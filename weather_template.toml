@@ -1,0 +1,76 @@
+[global]
+    work_root_path          = <work_root_path>
+    run_path                = <run_path>
+    run_name                = <run_name>
+    net                     = "LitAutoEncoder"
+    save_data_path          = "data/numpy/"
+    extra_data_path         = "data/extra/"
+    figure_path             = "figures/"
+    weights_path            = "data/weights/"
+    print_date_strformat    = "%Y-%m-%d,%H:%M"
+    debug                   = false
+
+[data]
+    var_forecast            = "gh" # "t"    "u10"
+    var_analysis            = "gh" # "T2M"  "U10M"
+    levhpa                  = 500
+    # Nord Atlantic box
+    lonini                  = -55
+    lonfin                  = -23
+    latini                  = 35
+    latfin                  = 3
+    # Italian peninsula box
+    # lonini                  = 5
+    # lonfin                  = 23.5
+    # latini                  = 49
+    # latfin                  = 25.5
+    domain_size             = 256 # if set lonfin snd latfin are ignored
+    detrend                 = false
+    anomaly                 = true
+    # source                  = "cmcc"
+    source                  = "ecmwf"
+    # acquisition_frequency   = "6h"
+    forecast_delta          = 2
+    download_path           = "data/ECMWF/" # in work_root_path
+
+[cmcc]
+    forecast_path           = "/data/inputs/METOCEAN/rolling/model/atmos/ECMWF/IFS_010/1.0forecast/"
+    analysis_path           = "/data/inputs/METOCEAN/historical/model/atmos/ECMWF/IFS_010/analysis/"
+    # analysis_path           = "/data/inputs/METOCEAN/rolling/model/atmos/ECMWF/IFS_010/3.1analysis/"
+    origin_frequency        = "12h"
+    prod_freq_forecast      = "1h"
+    prod_freq_analysis      = "6h"
+    file_format_forecast    = "grib"
+    file_format_analysis    = "grib" # "netcdf"
+
+[ecmwf]
+    ensemble_dataype        = "cf" # "pf"
+    origin_frequency        = "6h"
+
+[train]
+    # train_start_date        = "2020-01-01T00:00:00"
+    # train_end_date          = "2025-05-27T00:00:00"
+    # test_date               = "2019-12-28T00:00:00"
+    # annual training
+    train_start_date        = "2024-01-01T00:00:00"
+    train_end_date          = "2025-01-01T00:00:00"
+    # train_end_date          = "2024-01-05T00:00:00"
+[test]
+    test_start_date         = "2025-01-01T06:00:00"
+    test_end_date           = "2025-02-01T00:00:00"
+    cmap                    = "magma"
+    cmap_anomaly            = "RdBu"
+    cmap_error              = "bwr"
+
+[hyper]
+    learning_rate           = 1e-4
+    batch_size              = 64 # important
+    epochs                  = 200
+    # loss                    = "MSELoss"
+    # loss                    = "L1Loss"
+    # loss                    = "CrossEntropyLoss"
+    loss                    = "BCEWithLogitsLoss"
+    # norm_strategy           = "InstanceNorm2d"
+    norm_strategy           = "BatchNorm2d"
+    # norm_strategy           = "LayerNorm"
+    supervised              = true
