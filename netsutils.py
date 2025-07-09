@@ -227,7 +227,7 @@ class WeatherUtils:
                 forecast_fn = glob.glob(forecast_path + forecast_fn_glob)[0]
             except:
                 errormsg = f"Couldn't find forecast file {forecast_path + forecast_fn_glob}"
-                if source == "cmcc":
+                if self.source == "cmcc":
                     # If exact +deltaforecast is not present attempt to estimate with nearest +-1h forecasts
                     minus1h_d = d - datetime.timedelta(hours=1)
                     plus1h_d = d + datetime.timedelta(hours=1)
