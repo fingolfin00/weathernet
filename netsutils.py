@@ -11,7 +11,6 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import TwoSlopeNorm
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import matplotlib
-matplotlib.use('Agg')  # Use a non-interactive backend
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 from pathlib import Path
@@ -31,6 +30,9 @@ from sklearn.preprocessing import (
     StandardScaler,
     minmax_scale,
 )
+
+matplotlib.use('Agg')  # Use a non-interactive backend
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 class Common:
     @staticmethod
@@ -636,6 +638,94 @@ class WeatherUtils:
         weights_fn = self.get_weights_fn(model)
         self.logger.info(f"Save weights in file: {weights_fn}")
         torch.save(model.state_dict(), f"{self.weights_folder}{weights_fn}")
+
+    def train (self):
+        model = self.Net(
+            learning_rate=self.learning_rate,
+            loss=self.criterion,
+            norm=self.norm,
+            supervised=self.supervised,
+            extra_logger=self.logger
+        ).to(self.device)
+        num_workers = min(os.cpu_count(), 8)  # safe default
+        # Tensorboard
+        tl_logger = TensorBoardLogger(self.run_path+"lightning_logs", name=self.run_name)
+        # Prepare data if necessary
+        self.prepare_data("train")
+        # Load data for training
+        X_np, y_np, _ = self.load_data(model, 'train')
+        # Normalize data (example: min-max scaling to [0, 1])
+        X_np, _ = self.normalize(X_np)
+        y_np, _ = self.normalize(y_np)
+        dataset = WeatherDataset(X_np, y_np)
+        # Split into train (90%) and test (10%)
+        num_samples = X_np.shape[0]
+        test_size = int(0.1 * num_samples)
+        train_size = num_samples - test_size
+        train_dataset, validation_dataset = random_split(dataset, [train_size, test_size])
+        # Create data loaders
+        train_dataloader = DataLoader(train_dataset, batch_size=self.batch_size, num_workers=num_workers)
+        validation_dataloader = DataLoader(validation_dataset, batch_size=self.batch_size, shuffle=False, num_workers=num_workers)
+        # DEBUG if crazy errors show up
+        # x, y = next(iter(train_dataloader))
+        # x, y = x.cuda(), y.cuda()  # if using CUDA
+        # out = model(x)
+        # loss = model.loss(out, y)
+        # try:
+        #     loss.backward()
+        # except Exception as e:
+        #     self.logger.info("Backward error:", e)
+        #     self.logger.info("Loss value:", loss)
+        #     self.logger.info("out stats:", out.min(), out.max(), out.mean())
+        #     self.logger.info("target stats:", y.min(), y.max(), y.mean())
+        #     raise
+        # Train
+        trainer = L.Trainer(max_epochs=self.epochs, log_every_n_steps=1, logger=tl_logger)
+        trainer.fit(model, train_dataloader, validation_dataloader)
+        # Save model weights
+        self.save_weights(model)
+        return model
+
+    def test (self):
+        model = self.Net(
+            learning_rate=self.learning_rate,
+            loss=self.criterion,
+            norm=self.norm,
+            supervised=self.supervised,
+            extra_logger=self.logger
+        ).to(self.device)
+        num_workers = min(os.cpu_count(), 8)  # safe default
+        # Prepare data if necessary
+        self.prepare_data("test")
+        # Load data for testing
+        X_np_test, y_np_test, date_range = self.load_data(model, 'test')
+        # Normalize data
+        X_np_test, X_scaler = self.normalize(X_np_test)
+        y_np_test, y_scaler = self.normalize(y_np_test)
+        test_dataset = WeatherDataset(X_np_test, y_np_test)
+        # Create data loaders
+        test_dataloader = DataLoader(test_dataset, batch_size=1, num_workers=num_workers, shuffle=False)
+        # Load weights
+        self.logger.info(f"Load weights from file: {self.get_weights_fn(model)}")
+        model.load_state_dict(torch.load(f"{self.weights_folder}{self.get_weights_fn(model)}", map_location=self.device))
+        # Test
+        trainer = L.Trainer(max_epochs=self.epochs, log_every_n_steps=1)
+        output_d = trainer.test(model, dataloaders=test_dataloader)
+        all_outputs = model.test_step_outputs
+        self.logger.debug(f"Available keys in model output: {all_outputs[-1].keys()}")
+        # Diffusion
+        # all_outputs = torch.cat([r[0]["x0_recon"] for r in output_d], dim=0)
+        # outputs = all_outputs[-1]['x0_recon']
+        inputs, targets, outputs = [], [], []
+        for idx, (input, target) in enumerate(test_dataloader): # input=forecast, target=analysis + x days
+            inputs.append(input[0,:,:,:].cpu())
+            targets.append(target[0,:,:,:].cpu())
+            outputs.append(all_outputs[idx]['preds'][0,:,:,:])
+        # Denormalize
+        inputs = self.denormalize(np.array(inputs), X_scaler)
+        targets = self.denormalize(np.array(targets), y_scaler)
+        predictions = self.denormalize(np.array(outputs), X_scaler)
+        return model, inputs, targets, predictions
 
     def _create_cartopy_axis (
         self, fig, rows, cols, n, title, var, vmin_plt, vmax_plt, vcenter_plt, cmap,
