@@ -46,7 +46,7 @@ class Common:
     def trend(data):
         # Reshape to (T, nxn) to apply regression across all pixels
         reshaped = data.reshape(data.shape[0], -1)  # Shape: (T, n*n)
-        
+
         # Preallocate arrays for slope and intercept
         slopes = np.zeros(reshaped.shape[1])
         intercepts = np.zeros(reshaped.shape[1])
@@ -211,10 +211,10 @@ class WeatherUtils:
 
     def _get_base_data_fn (self, start_date, end_date):
         return f"{self.save_data_folder}{self.source}_{self.var_forecast}-{self.var_analysis}_{self.forecast_delta}_{start_date.strftime(self.new_date_strformat)}_{end_date.strftime(self.new_date_strformat)}"
-        
+
     def _get_train_data_fn (self):
         return self._get_base_data_fn(self.start_date, self.end_date)
-    
+
     def _get_test_data_fn (self):
         return self._get_base_data_fn(self.test_start_date, self.test_end_date)
 
@@ -407,21 +407,21 @@ class WeatherUtils:
                 analysis_coords_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
                 backend_kwargs={'filter_by_keys': {'cfVarName': self.var_analysis}}
             )
-        
+
         lon_fc_full = ds_forecast_coords['longitude'].values
         lat_fc_full = ds_forecast_coords['latitude'].values
         lev_fc_full = ds_forecast_coords['isobaricInhPa'].values
         lon_an_full = ds_analysis_coords['longitude'].values
         lat_an_full = ds_analysis_coords['latitude'].values
         lev_an_full = ds_analysis_coords['isobaricInhPa'].values
-        
+
         var_d['lon'] = {'analysis': lon_an_full}
         var_d['lat'] = {'analysis': lat_an_full}
         var_d['lev'] = {'analysis': lev_an_full}
         var_d['lon']['forecast'] = lon_fc_full
         var_d['lat']['forecast'] = lat_fc_full
         var_d['lev']['forecast'] = lev_fc_full
-        
+
         # Save data
         self.logger.info(f"Saving data in {data_fn}")
         with open(f"{data_fn}", 'wb') as f:
@@ -439,14 +439,14 @@ class WeatherUtils:
         self.logger.info(f"Loading {type} data from {data_fn}")
         with open(f"{data_fn}", 'rb') as f:
             var_d = np.load(f, allow_pickle=True)['arr_0'].item()
-        
+
         lon_an_full = var_d['lon']['analysis']
         lat_an_full = var_d['lat']['analysis']
         lev_an_full = var_d['lev']['analysis']
         lon_fc_full = var_d['lon']['forecast']
         lat_fc_full = var_d['lat']['forecast']
         lev_fc_full = var_d['lev']['forecast']
-        
+
         self.logger.debug(f"lon_an[0], lon_an[-1]: {lon_an_full[0]}, {lon_an_full[-1]}")
         self.logger.debug(f"lon_fc[0], lon_fc[-1]: {lon_fc_full[0]}, {lon_fc_full[-1]}")
         self.logger.debug(f"lat_an[0], lat_an[-1]: {lat_an_full[0]}, {lat_an_full[-1]}")
@@ -463,7 +463,7 @@ class WeatherUtils:
         latfin_an_idx = (np.abs(lat_an_full - latfin)).argmin()
         lev_analysis = (np.abs(lev_an_full - self.levhpa)).argmin()
         lev_forecast = (np.abs(lev_fc_full - self.levhpa)).argmin()
-        
+
         if self.size_an:
             self.logger.info(f"Selected regular square size for analysis: {self.size_an}x{self.size_an}")
             self.logger.info(f"Ignoring latfin: {latfin} and lonfin: {lonfin}")
@@ -477,12 +477,12 @@ class WeatherUtils:
             latfin = lat_an_full[latfin_an_idx]
             lonfin_fc_idx = (np.abs(lon_fc_full - lonfin)).argmin()
             latfin_fc_idx = (np.abs(lat_fc_full - latfin)).argmin()
-            
+
         self.lonfc = lon_fc_full[lonini_fc_idx:lonfin_fc_idx]
         self.latfc = lat_fc_full[latini_fc_idx:latfin_fc_idx]
         self.lonan = lon_an_full[lonini_an_idx:lonfin_an_idx]
         self.latan = lat_an_full[latini_an_idx:latfin_an_idx]
-        
+
         self.logger.info(f"lat ini {self.latini}, lat fin {latfin} (forecast ds) = {latini_fc_idx}, {latfin_fc_idx}")
         self.logger.info(f"lat ini {self.latini}, lat fin {latfin} (analysis ds) = {latini_an_idx}, {latfin_an_idx}")
         self.logger.info(f"lon ini {self.lonini}, lon fin {lonfin} (forecast ds) = {lonini_fc_idx}, {lonfin_fc_idx}")
@@ -495,42 +495,41 @@ class WeatherUtils:
         # Lists to hold all samples
         forecast_data = []
         analysis_data = []
-        
+
         # Extract data from dictionary
         for key in var_d.keys():  # Loop through all timesteps
             if key not in ['lon', 'lat', 'lev']:
                 # Get 2D fields
                 forecast = var_d[key]["forecast"]  # Shape: (height, width)
                 analysis = var_d[key]["analysis"]  # Shape: (height, width)
-            
+
                 if len(analysis.shape) == 3:
                     analysis = analysis[lev_analysis,latini_an_idx:latfin_an_idx,lonini_an_idx:lonfin_an_idx]
                 elif len(analysis.shape) == 2:
                     analysis = analysis[latini_an_idx:latfin_an_idx,lonini_an_idx:lonfin_an_idx]
                 else:
                     self.logger.error(f"Unsupported dimensions {analysis.shape} for {self.var_analysis}")
-            
+
                 if len(forecast.shape) == 3:
                     forecast = forecast[lev_forecast,latini_fc_idx:latfin_fc_idx,lonini_fc_idx:lonfin_fc_idx]
                 elif len(forecast.shape) == 2:
                     forecast = forecast[latini_fc_idx:latfin_fc_idx,lonini_fc_idx:lonfin_fc_idx]
                 else:
                     self.logger.error(f"Unsupported dimensions {forecast.shape} for {self.var_forecast}")
-            
+
                 # if self.anomaly:
                 #     forecast = np.mean(forecast) - forecast
                 #     analysis = np.mean(analysis) - analysis
                 # Add channel dimension (PyTorch expects [channels, height, width])
                 forecast = np.expand_dims(forecast, axis=0)  # New shape: (1, height, width)
                 analysis = np.expand_dims(analysis, axis=0)  # New shape: (1, height, width)
-                
+
                 forecast_data.append(forecast)
                 analysis_data.append(analysis)
-        
+
         # Convert to numpy arrays (shape: [num_samples, 1, height, width])
         X_np = np.stack(forecast_data, axis=0)  # Stack along sample dimension
         y_np = np.stack(analysis_data, axis=0)
-
         # Prune data of unwanted datapoints if required
         errs = y_np - X_np
         mean_errs = errs.mean(axis=(2,3))[:,0]
@@ -558,7 +557,7 @@ class WeatherUtils:
             self.logger.debug(f"{dates[(pruned_mean_errs > self.error_limit).astype(bool)]}")
             self.logger.debug(f"Pruned timepsteps where an-fc < -{self.error_limit}:")
             self.logger.debug(f"{dates[(pruned_mean_errs < -self.error_limit).astype(bool)]}")
-        
+
         average_data_path = f"{self.extra_data_folder}{average_data_fn}"
         if type == 'train':
             self.logger.info(f"Save training period average in {average_data_fn}")
@@ -577,7 +576,7 @@ class WeatherUtils:
         if self.anomaly:
             X_np -= average_fc
             y_np -= average_an
-        
+
         if self.detrend:
             # Load trend data
             self.logger.info(f"Loading trend from {trend_data_fn}")
@@ -633,7 +632,7 @@ class WeatherUtils:
 
     def _get_pics_fn (self, model, date):
         return f"{self._get_final_products_base_fn(model)}_{date.strftime(self.plot_date_strformat)}.png"
-        
+
     def save_weights (self, model):
         weights_fn = self.get_weights_fn(model)
         self.logger.info(f"Save weights in file: {weights_fn}")
@@ -758,7 +757,7 @@ class WeatherUtils:
             alpha=0.5,
             linestyle='--'
         )
-        
+
         # Turn off labels on top and right side
         gl.top_labels = False
         gl.right_labels = False
@@ -779,18 +778,15 @@ class WeatherUtils:
         # Remove channel dimension
         average_fc = np.squeeze(average_d["forecast"], axis=1)
         average_an = np.squeeze(average_d["analysis"], axis=1)
-        # Remove channel dimension and denormalize, shape becomes (H, W)
-        # sample_forecast = self.denormalize(inputs.cpu().numpy(), fc_scaler)
-        # sample_analysis = self.denormalize(targets.cpu().numpy(), an_scaler)
-        # prediction = self.denormalize(outputs.cpu().numpy(), fc_scaler)
+
         sample_forecast = inputs
         sample_analysis = targets
         prediction = outputs
-        
+
         # Plot forecast, analysis, and prediction error
         self.logger.info(f"Plot one forecast {sample_forecast.shape}, analysis {sample_analysis.shape} and prediction {prediction.shape} in {date.strftime(self.plot_date_strformat)}.")
         fig = plt.figure(figsize=(12, 18)) # col, row
-        
+
         if len(sample_forecast.shape) == 3:
             plot_sample_fc = sample_forecast[-1,:,:]
         elif len(sample_forecast.shape) == 2:
@@ -832,16 +828,13 @@ class WeatherUtils:
             cmap = self.cmap
         title_details = f" {self.var_forecast}a" if self.anomaly else f" {self.var_forecast}"
         title_details += f" at {self.levhpa} hPa (" + date.strftime(self.plot_date_strformat) + ")"
-        
+
         # Forecast
         ax1 = self._create_cartopy_axis (fig, 3, 2, 3, 'Forecast' + title_details, plot_sample_fc, vmin_plt, vmax_plt, vcenter_plt, cmap)
-        
         # Analysis
         ax2 = self._create_cartopy_axis (fig, 3, 2, 1, 'Analysis' + title_details, plot_sample_an, vmin_plt, vmax_plt, vcenter_plt, cmap)
-
         # Prediction
         ax3 = self._create_cartopy_axis (fig, 3, 2, 5, 'Prediction' + title_details, plot_pred, vmin_plt, vmax_plt, vcenter_plt, cmap)
-
         # Average of analysis
         title_avg = f"Avg analysis {self.var_forecast} at {self.levhpa} hPa ({self.start_date.strftime(self.plot_date_strformat)} - {self.end_date.strftime(self.plot_date_strformat)})"
         if self.anomaly:
@@ -849,7 +842,7 @@ class WeatherUtils:
             vmax_plt = np.max(plot_average_an)
             vcenter_plt = vmin_plt+(vmax_plt-vmin_plt)/2
         ax6 = self._create_cartopy_axis (fig, 3, 2, 2, title_avg, plot_average_an, vmin_plt, vmax_plt, vcenter_plt, self.cmap) # always complete field cmap 
-    
+
         # Error (Analysis - Forecast)
         error_fc = plot_sample_an - plot_sample_fc
         vmin_plt = np.min(error_fc)
@@ -881,7 +874,7 @@ class WeatherUtils:
         else:
             self.logger.error(f"Unsupported dimensions {error_fc.shape} for error")
         ax5 = self._create_cartopy_axis (fig, 3, 2, 4, 'Forecast Error' + title_details, plot_err, vmin_plt, vmax_plt, vcenter_plt, self.cmap_error)
-        
+
         plt.tight_layout()
         plt.savefig(self.fig_folder + self._get_pics_fn(model, date))
         plt.close()
