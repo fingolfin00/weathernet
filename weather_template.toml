@@ -8,7 +8,7 @@
     figure_path             = "figures/"
     weights_path            = "data/weights/"
     print_date_strformat    = "%Y-%m-%d,%H:%M"
-    log_level               = "debug"
+    log_level               = "info" # "debug"
 
 [data]
     var_forecast            = "gh" # "t"    "u10"
