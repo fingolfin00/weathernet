@@ -74,7 +74,7 @@ class WeatherUtils:
         # Global
         self.run_name                = self.config["global"]["run_name"]
         self.work_root_path          = self.config["global"]["work_root_path"]
-        self.run_path                = self.config["global"]["run_root_path"] + self.run_name
+        self.run_path                = self.config["global"]["run_root_path"] + self.run_name + "/"
         self.netname                 = self.config["global"]["net"]
         self.Net                     = globals()[self.netname]
         self.save_data_folder        = self.work_root_path + self.config["global"]["save_data_path"]
