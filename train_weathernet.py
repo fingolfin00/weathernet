@@ -26,12 +26,16 @@ def train_weathernet():
     # Tensorboard
     logger = TensorBoardLogger(wd.run_path+"lightning_logs", name=wd.run_name)
 
+    # Prepare data if necessary
+    wd.prepare_data("train")
     # Load data for training
-    X_np, y_np = wd.load_data(model, 'train')
+    X_np, y_np, _ = wd.load_data(model, 'train')
     
     # Normalize data (example: min-max scaling to [0, 1])
-    X_np, _, _ = Common.normalize(X_np)
-    y_np, _, _ = Common.normalize(y_np)
+    # X_np, _, _ = Common.rescale(X_np)
+    # y_np, _, _ = Common.rescale(y_np)
+    X_np, _ = wd.normalize(X_np)
+    y_np, _ = wd.normalize(y_np)
     
     dataset = WeatherDataset(X_np, y_np)
     
@@ -45,8 +49,12 @@ def train_weathernet():
     train_dataloader = DataLoader(train_dataset, batch_size=wd.batch_size, num_workers=num_workers)
     validation_dataloader = DataLoader(validation_dataset, batch_size=wd.batch_size, shuffle=False, num_workers=num_workers)
     for X, y in train_dataloader:
-        print(f"Shape of X [N, C, H, W]: {X.shape}")
-        print(f"Shape of y: {y.shape} {y.dtype}")
+        print(f"Shape of input  X (forecast) training set [N, C, H, W]: {X.shape}")
+        print(f"Shape of target y (analysis) training set [N, C, H, W]: {y.shape} {y.dtype}")
+        break
+    for X, y in validation_dataloader:
+        print(f"Shape of input  X (forecast) validation set [N, C, H, W]: {X.shape}")
+        print(f"Shape of target y (analysis) validation set [N, C, H, W]: {y.shape} {y.dtype}")
         break
     print(f"Using {device} device")
     print(f"Hyperparamters:")
