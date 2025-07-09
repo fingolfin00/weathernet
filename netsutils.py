@@ -224,8 +224,8 @@ class WeatherRun:
     def setup_logger (self):
         self.logger.setLevel(self.log_level)
         self.logger.handlers = []  # Clear existing handlers
-        formatter = colorlog.ColoredFormatter(
-            self.log_format_string,
+        formatter_color = colorlog.ColoredFormatter(
+            self.log_format_string_color,
             log_colors={
                 'DEBUG':    'cyan',
                 'INFO':     'green',
@@ -235,8 +235,9 @@ class WeatherRun:
             },
         )
         console_handler = colorlog.StreamHandler()
-        console_handler.setFormatter(formatter)
+        console_handler.setFormatter(formatter_color)
         self.logger.addHandler(console_handler)
+        formatter = logging.Formatter(self.log_format_string)
         file_handler = logging.FileHandler(self.log_filename)
         file_handler.setFormatter(formatter)
         self.logger.addHandler(file_handler)
