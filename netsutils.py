@@ -519,7 +519,7 @@ class WeatherUtils:
             X_np -= np.expand_dims(trend_fc.reshape(X_np.shape[0], X_np.shape[-2], X_np.shape[-1]), axis=1)
             y_np -= np.expand_dims(trend_an.reshape(y_np.shape[0], y_np.shape[-2], y_np.shape[-1]), axis=1)
 
-        return X_np, y_np
+        return X_np, y_np, dates
 
     def normalize (self, data):
         # Remove channel dimension (channel number C is always 1)
