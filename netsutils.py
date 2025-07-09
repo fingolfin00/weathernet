@@ -30,6 +30,7 @@ from sklearn.preprocessing import (
     StandardScaler,
     minmax_scale,
 )
+from itertools import product
 
 matplotlib.use('Agg')  # Use a non-interactive backend
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -68,21 +69,45 @@ class Common:
         # trend_map = slopes.reshape(data.shape[-2], data.shape[-1])
         # return trend_map
 
-class WeatherUtils:
+class WeatherConfig:
     def __init__ (self, tomlfn):
         self.tomlfn = tomlfn
         # User configuration
         self.config = toml.load(tomlfn)
+
+    def generate_hyper_combo (self):
+        # Use itertools.product to get all combinations
+        # The '*' unpacks the list of arrays into separate arguments for product
+        hyper, keys = [], []
+        for key in self.config["hyper"]:
+            hyper.append(self.config["hyper"][key])
+            keys.append(key)
+        all_combinations = product(*hyper)
+        run_configurations = {}
+        for i, combo_tuple in enumerate(all_combinations):
+            # self.logger.info(combo_tuple)
+            # self.logger.info(keys)
+            # Create a dictionary for the current combination
+            # Use zip to map the parameter keys to their values in the current combination
+            run_parameters = dict(zip(keys, combo_tuple))
+            run_configurations[f"run_{i}"] = run_parameters
+        return run_configurations
+
+
+class WeatherRun:
+    def __init__ (self, weather_config, hyper, run):
+        # User configuration
+        self.config                  = weather_config.config
         # Global
-        self.run_name                = self.config["global"]["run_name"]
+        self.run_base_name           = self.config["global"]["run_name"]
+        self.run_number              = run
+        self.run_name                = self.run_base_name + "_" + self.run_number
+        self.run_base_path           = self.config["global"]["run_root_path"] + self.run_base_name + "/"
+        self.run_path                = self.run_base_path  + self.run_number + "/"
         self.work_root_path          = self.config["global"]["work_root_path"]
-        self.run_path                = self.config["global"]["run_root_path"] + self.run_name + "/"
         self.netname                 = self.config["global"]["net"]
         self.Net                     = globals()[self.netname]
         self.save_data_folder        = self.work_root_path + self.config["global"]["save_data_path"]
-        self.extra_data_folder       = self.run_path + self.config["global"]["extra_data_path"]
-        self.fig_folder              = self.run_path + self.config["global"]["figure_path"]
-        self.weights_folder          = self.run_path + self.config["global"]["weights_path"]
         self.folder_freq             = "1d"
         self.print_date_strformat    = self.config["global"]["print_date_strformat"]
         self.folder_date_strformat   = "%Y%m%d"
@@ -90,17 +115,22 @@ class WeatherUtils:
         self.new_date_strformat      = "%Y%m%d%H%M"
         self.plot_date_strformat     = "%Y%m%d-%H%M"
         self.data_extension          = ".npy.npz"
+        self.extra_data_folder       = self.run_path + self.config["global"]["extra_data_path"]
+        self.fig_folder              = self.run_path + self.config["global"]["figure_path"]
+        self.weights_folder          = self.run_path + self.config["global"]["weights_path"]
         # Log
         self.log_level_str           = self.config["global"]["log_level"]
         self.log_level               = getattr(logging, self.log_level_str.upper())
-        self.logger                  = logging.getLogger(__name__)
-        self.log_folder              = self.run_path + "logs/"
-        self.log_filename            = self.log_folder + self.run_name
-        self.log_format_string       = (
+        self.log_format_string_color = (
                                         # '%(log_color)s%(asctime)s [%(levelname)s: %(name)s] %(message)s'
                                         '%(log_color)s[%(levelname)s]%(reset)s %(name)s: %(message)s'
                                         # '%(funcName)s:%(lineno)d - %(message)s'
         )
+        self.log_format_string       = ('[%(asctime)s %(levelname)s] %(name)s: %(message)s')
+        self.logger                  = logging.getLogger(__name__)
+        self.log_folder              = self.run_path + "logs/"
+        self.log_filename            = self.log_folder + self.run_name + ".log"
+        self.tl_logdir               = self.run_base_path + "lightning_logs"
         # GPU
         self.device                  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # Data
@@ -128,22 +158,24 @@ class WeatherUtils:
         self.cmap                    = self.config["test"]["cmap"]
         self.cmap_anomaly            = self.config["test"]["cmap_anomaly"]
         self.cmap_error              = self.config["test"]["cmap_error"]
+        # Suffices for file names
+        self.suffix = "_anomaly" if self.anomaly else ""
+        self.suffix += "_detrend" if self.detrend else ""
         # Make folders if necessary
         os.makedirs(self.save_data_folder, exist_ok=True)
         os.makedirs(self.extra_data_folder, exist_ok=True)
         os.makedirs(self.fig_folder, exist_ok=True)
         os.makedirs(self.weights_folder, exist_ok=True)
         os.makedirs(self.log_folder, exist_ok=True)
-        # Suffices for file names
-        self.suffix = "_anomaly" if self.anomaly else ""
-        self.suffix += "_detrend" if self.detrend else ""
+        os.makedirs(self.tl_logdir, exist_ok=True)
         # Hyperparameters
-        self.learning_rate           = self.config["hyper"]["learning_rate"]
-        self.batch_size              = self.config["hyper"]["batch_size"]
-        self.epochs                  = self.config["hyper"]["epochs"]
-        self.loss                    = self.config["hyper"]["loss"]
-        self.norm_strategy           = self.config["hyper"]["norm_strategy"]
-        self.supervised              = self.config["hyper"]["supervised"]
+        self.hyper_dict              = hyper
+        self.learning_rate           = self.hyper_dict["learning_rate"]
+        self.batch_size              = self.hyper_dict["batch_size"]
+        self.epochs                  = self.hyper_dict["epochs"]
+        self.loss                    = self.hyper_dict["loss"]
+        self.norm_strategy           = self.hyper_dict["norm_strategy"]
+        self.supervised              = self.hyper_dict["supervised"]
         self.supervised_str = "supervised" if self.supervised else "unsupervised"
         criterion = getattr(nn, self.loss)
         self.criterion = criterion()
@@ -631,7 +663,7 @@ class WeatherUtils:
         return f"{self._get_final_products_base_fn(model)}.pth"
 
     def _get_pics_fn (self, model, date):
-        return f"{self._get_final_products_base_fn(model)}_{date.strftime(self.plot_date_strformat)}.png"
+        return f"{date.strftime(self.plot_date_strformat)}.png"
 
     def save_weights (self, model):
         weights_fn = self.get_weights_fn(model)
@@ -648,7 +680,7 @@ class WeatherUtils:
         ).to(self.device)
         num_workers = min(os.cpu_count(), 8)  # safe default
         # Tensorboard
-        tl_logger = TensorBoardLogger(self.run_path+"lightning_logs", name=self.run_name)
+        tl_logger = TensorBoardLogger(self.tl_logdir, name=self.run_base_name, version=self.run_number)
         # Prepare data if necessary
         self.prepare_data("train")
         # Load data for training

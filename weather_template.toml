@@ -64,15 +64,14 @@
     cmap_anomaly            = "RdBu"
     cmap_error              = "bwr"
 
-[hyper]
-    learning_rate           = 1e-4
-    batch_size              = 64 # important
-    epochs                  = 200
-    loss                    = "MSELoss"
+    learning_rate           = [1e-3, 5e-4, 1e-4]
+    batch_size              = [64] # important
+    epochs                  = [200]
+    loss                    = ["MSELoss", "L1Loss"]
     # loss                    = "L1Loss"
     # loss                    = "CrossEntropyLoss"
     # loss                    = "BCEWithLogitsLoss"
     # norm_strategy           = "InstanceNorm2d"
-    norm_strategy           = "BatchNorm2d"
+    norm_strategy           = ["BatchNorm2d"]
     # norm_strategy           = "LayerNorm"
-    supervised              = true
+    supervised              = [true, false]
