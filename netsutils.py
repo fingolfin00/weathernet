@@ -1,4 +1,4 @@
-import glob, os, sys, torch, datetime, cfgrib, time, toml, importlib, colorlog, logging
+import glob, os, sys, torch, datetime, cfgrib, time, toml, importlib, colorlog, logging, subprocess, psutil
 from torch import nn
 from torch.utils.data import random_split, Dataset, DataLoader
 import torch.nn.functional as F
@@ -758,6 +758,55 @@ class WeatherRun:
         targets = self.denormalize(np.array(targets), y_scaler)
         predictions = self.denormalize(np.array(outputs), X_scaler)
         return model, inputs, targets, predictions
+
+    def _is_port_in_use(self, port, host='0.0.0.0'):
+        """Checks if the given port is already in use."""
+        for conn in psutil.net_connections(kind='inet'):
+            if conn.status == psutil.CONN_LISTEN:
+                if conn.laddr.port == port:
+                    # Check if the host matches or if it's listening on all interfaces
+                    if host == '0.0.0.0' or conn.laddr.ip == host:
+                        try:
+                            # Attempt to get process name to be more specific (optional)
+                            process = psutil.Process(conn.pid)
+                            if "tensorboard" in process.name().lower() or \
+                               "python" in process.name().lower() and "tensorboard" in " ".join(process.cmdline()).lower():
+                                self.logger.warning(f"TensorBoard (PID: {conn.pid}) is already listening on port {port}.")
+                                return True
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            # Process might have ended, or permission denied to check its name/cmdline
+                            self.logger.info(f"Port {port} is in use by a process (PID: {conn.pid}), potentially TensorBoard.")
+                            return True
+                        return True # Port is in use, regardless of process name check success
+        return False
+
+    def start_tensorboard (self):
+        host = "0.0.0.0"
+        port = "6007"
+        command = [
+            "tensorboard",
+            f"--logdir={self.tl_logdir}",
+            f"--host={host}",
+            f"--port={port}"
+        ]
+        self.logger.info(f"Starting TensorBoard with command: {' '.join(command)}")
+        if self._is_port_in_use(port, host):
+            self.logger.info(f"TensorBoard is already running on http://jupyterhub.juno.cmcc.scc:8000/user/jd19424/proxy/{port}/. Skipping launch.")
+        else:
+            self.logger.info(f"Port {port} is free. Attempting to launch TensorBoard...")
+            try:
+                # Use Popen to run in the background (non-blocking)
+                # If you want it to block until TensorBoard is closed, use subprocess.run() instead
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.DEVNULL, # Redirect stdout to devnull
+                    stderr=subprocess.DEVNULL, # Redirect stderr to devnull
+                    preexec_fn=os.setsid) # Detach from current process group
+                self.logger.info(f"TensorBoard started. Access it at http://jupyterhub.juno.cmcc.scc:8000/user/jd19424/proxy/{port}/")
+            except FileNotFoundError:
+                self.logger.error("'tensorboard' command not found. Make sure TensorBoard is installed and in your PATH.")
+            except Exception as e:
+                self.logger.error(f"An error occurred: {e}")
 
     def _create_cartopy_axis (
         self, fig, rows, cols, n, title, var, vmin_plt, vmax_plt, vcenter_plt, cmap,
