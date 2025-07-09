@@ -1,4 +1,5 @@
 Things to do
 
-1. Add support for multiple hyperparameters
+1. Add support for multiple hyperparameters # DONE
 2. Logging with colorlog is fine, but internal lightning logs has different format, look if it is possible to align them together
+3. Would be nice to launch tensorboard from the script, currentyl it doesn't work
