@@ -133,7 +133,7 @@ class WeatherUtils:
         self.norm = getattr(nn, self.norm_strategy)
 
     def _get_base_data_fn (self, start_date, end_date):
-        return f"{self.save_data_folder}{self.source}_{self.var_forecast}-{self.var_analysis}_{self.forecast_delta}_{start_date.strftime(self.folder_date_strformat)}_{end_date.strftime(self.folder_date_strformat)}"
+        return f"{self.save_data_folder}{self.source}_{self.var_forecast}-{self.var_analysis}_{self.forecast_delta}_{start_date.strftime(self.new_date_strformat)}_{end_date.strftime(self.new_date_strformat)}"
         
     def _get_train_data_fn (self):
         return self._get_base_data_fn(self.start_date, self.end_date)
