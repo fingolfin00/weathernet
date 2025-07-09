@@ -80,7 +80,7 @@ class WeatherUtils:
         self.save_data_folder        = self.work_root_path + self.config["global"]["save_data_path"]
         self.extra_data_folder       = self.run_path + self.config["global"]["extra_data_path"]
         self.fig_folder              = self.run_path + self.config["global"]["figure_path"]
-        self.weights_folder          = self.work_root_path + self.config["global"]["weights_path"]
+        self.weights_folder          = self.run_path + self.config["global"]["weights_path"]
         self.folder_freq             = "1d"
         self.print_date_strformat    = self.config["global"]["print_date_strformat"]
         self.folder_date_strformat   = "%Y%m%d"
@@ -101,6 +101,7 @@ class WeatherUtils:
         self.source                  = self.config["data"]["source"]
         self.forecast_delta          = self.config["data"]["forecast_delta"]
         # self.acq_freq              = self.config["data"]["acquisition_frequency"]
+        self.download_path           = self.work_root_path + self.config["data"]["download_path"]
         # Train
         self.start_date              = datetime.datetime.fromisoformat(self.config["train"]["train_start_date"])
         self.end_date                = datetime.datetime.fromisoformat(self.config["train"]["train_end_date"])
@@ -176,7 +177,7 @@ class WeatherUtils:
             en_datatype = self.config["ecmwf"]["ensemble_dataype"]
             head_forecast_fn = "forecast-"
             head_analysis_fn = "analysis-"
-            forecast_root_path = self.config["data"]["download_path"]
+            forecast_root_path = self.download_path
             analysis_root_path = forecast_root_path
             orig_freq = self.config["ecmwf"]["origin_frequency"]
             grib_dict = {'dataType': en_datatype, 'cfVarName': self.var_forecast}
