@@ -92,6 +92,7 @@ class WeatherUtils:
         # Data
         self.var_forecast            = self.config["data"]["var_forecast"]
         self.var_analysis            = self.config["data"]["var_analysis"]
+        self.error_limit             = self.config["data"]["error_limit"]
         self.levhpa                  = self.config["data"]["levhpa"]
         self.lonini, self.lonfin     = self.config["data"]["lonini"], self.config["data"]["lonfin"]
         self.latini, self.latfin     = self.config["data"]["latini"], self.config["data"]["latfin"]
@@ -451,6 +452,37 @@ class WeatherUtils:
         # Convert to numpy arrays (shape: [num_samples, 1, height, width])
         X_np = np.stack(forecast_data, axis=0)  # Stack along sample dimension
         y_np = np.stack(analysis_data, axis=0)
+
+        # Prune data of unwanted datapoints if required
+        errs = y_np - X_np
+        mean_errs = errs.mean(axis=(2,3))[:,0]
+        print(f"Average an-fc error: {errs.mean()}")
+        if self.debug:
+            print("[DEBUG] Mean errors for each timestep:")
+            print(mean_errs)
+        dates = np.array([x for x in list(var_d.keys()) if x not in ['lon', 'lat', 'lev']])
+        if self.error_limit:
+            # print(f"Indices where fc-an<-{self.error_limit}: {np.argwhere(mean_errs < -self.error_limit)}")
+            # print(f"Indices where fc-an>{self.error_limit}: {np.argwhere(mean_errs > self.error_limit)}") 
+            condition = (mean_errs > self.error_limit).astype(bool) | (mean_errs < -self.error_limit).astype(bool)
+            full_dates = dates.copy()
+            dates = np.delete(dates, condition)
+            X_np  = np.delete(X_np, condition, axis=0)
+            y_np  = np.delete(y_np, condition, axis=0)
+            if self.debug:
+                print(f"[DEBUG] Full timesteps where an-fc >  {self.error_limit}:")
+                print(f"{full_dates[(mean_errs > self.error_limit).astype(bool)]}")
+                print("[DEBUG]  max values:")
+                print(f"{mean_errs[(mean_errs > self.error_limit).astype(bool)]}")
+                print(f"[DEBUG] Full timepsteps where an-fc < -{self.error_limit}:")
+                print(f"{full_dates[(mean_errs < -self.error_limit).astype(bool)]}")
+                print("[DEBUG]  min values:")
+                print(f"{mean_errs[(mean_errs < -self.error_limit).astype(bool)]}")
+                pruned_mean_errs = np.delete(mean_errs, condition)
+                print(f"[DEBUG] Pruned timesteps where an-fc >  {self.error_limit}:")
+                print(f"{dates[(pruned_mean_errs > self.error_limit).astype(bool)]}")
+                print(f"[DEBUG] Pruned timepsteps where an-fc < -{self.error_limit}:")
+                print(f"{dates[(pruned_mean_errs < -self.error_limit).astype(bool)]}")
         
         average_data_path = f"{self.extra_data_folder}{average_data_fn}"
         if type == 'train':
