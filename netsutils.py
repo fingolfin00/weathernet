@@ -132,9 +132,6 @@ class WeatherUtils:
         self.criterion = criterion()
         self.norm = getattr(nn, self.norm_strategy)
 
-        
-        # self.norm = norm()
-
     def _get_base_data_fn (self, start_date, end_date):
         return f"{self.save_data_folder}{self.source}_{self.var_forecast}-{self.var_analysis}_{self.forecast_delta}_{start_date.strftime(self.folder_date_strformat)}_{end_date.strftime(self.folder_date_strformat)}"
         
