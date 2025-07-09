@@ -68,10 +68,10 @@
     learning_rate           = 1e-4
     batch_size              = 64 # important
     epochs                  = 200
-    # loss                    = "MSELoss"
+    loss                    = "MSELoss"
     # loss                    = "L1Loss"
     # loss                    = "CrossEntropyLoss"
-    loss                    = "BCEWithLogitsLoss"
+    # loss                    = "BCEWithLogitsLoss"
     # norm_strategy           = "InstanceNorm2d"
     norm_strategy           = "BatchNorm2d"
     # norm_strategy           = "LayerNorm"
