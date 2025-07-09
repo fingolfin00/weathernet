@@ -21,18 +21,18 @@ from lightning.pytorch.loggers import TensorBoardLogger
 # from nets import WeatherCNN, MiniResNet18, ResNetUNet, UNetConvLSTM, SpatioTemporalForecastDataset
 from netslightning import LitAutoEncoder
 from diffusion import DiffusionUNet, DiffusionNoiseScheduler, LitDiffusion
+from sklearn.preprocessing import (
+    MaxAbsScaler,
+    MinMaxScaler,
+    Normalizer,
+    PowerTransformer,
+    QuantileTransformer,
+    RobustScaler,
+    StandardScaler,
+    minmax_scale,
+)
 
 class Common:
-    @staticmethod
-    def normalize(data):
-        data_min = data.min()
-        data_max = data.max()
-        return (data - data_min) / (data_max - data_min), data_max, data_min
-
-    @staticmethod
-    def denormalize(norm_data, data_max, data_min):
-        return data_min + norm_data * (data_max - data_min)
-
     @staticmethod
     def init_weights(m):
         if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
@@ -101,6 +101,8 @@ class WeatherUtils:
         self.size_an                 = self.config["data"]["domain_size"] # set a square domain starting from lonini and latini, lonfin and latfin are ignored
         self.source                  = self.config["data"]["source"]
         self.forecast_delta          = self.config["data"]["forecast_delta"]
+        self.scalername              = self.config["data"]["scaler_name"]
+        self.Scaler                  = globals()[self.scalername]
         # self.acq_freq              = self.config["data"]["acquisition_frequency"]
         self.download_path           = self.work_root_path + self.config["data"]["download_path"]
         # Train
@@ -518,6 +520,32 @@ class WeatherUtils:
             y_np -= np.expand_dims(trend_an.reshape(y_np.shape[0], y_np.shape[-2], y_np.shape[-1]), axis=1)
 
         return X_np, y_np
+
+    def normalize (self, data):
+        # Remove channel dimension (channel number C is always 1)
+        N, C, H, W = np.shape(data)
+        print(f"[DEBUG] Data before normalization: {np.shape(data)}")
+        data = np.squeeze(data, axis=1)
+        # Reshape along samples N
+        data = data.reshape(H, -1)
+        print(f"[DEBUG] Reshaped data before normalization: {np.shape(data)}")
+        scaler = self.Scaler().fit(data)
+        scaled_data = scaler.transform(data)
+        print(f"[DEBUG] Data after normalization: {np.shape(scaled_data)}")
+        scaled_data = scaled_data.reshape(N, C, H, W)
+        print(f"[DEBUG] Reshaped data after normalization: {np.shape(scaled_data)}")
+        return scaled_data, scaler
+
+    def denormalize (self, scaled_data, scaler):
+        print(f"[DEBUG] Data before denormalization: {np.shape(scaled_data)}")
+        N, C, H, W = np.shape(scaled_data)
+        scaled_data = np.squeeze(scaled_data, axis=1)
+        # Reshape along samples N
+        scaled_data = scaled_data.reshape(H, -1)
+        print(f"[DEBUG] Reshaped data before denormalization: {np.shape(scaled_data)}")
+        data = scaler.inverse_transform(scaled_data)
+        data = data.reshape(N, C, H, W)
+        return data
 
     def _get_final_products_base_fn (self, model):
         return f"{model.__class__.__name__}_{self.supervised_str}_{self.var_forecast}-{self.var_analysis}-{self.levhpa}hPa_{self.lonini:+2.1f}-{self.latini:+2.1f}_{self.size_an}x{self.size_an}_{self.batch_size}bs-{self.learning_rate}lr-{self.epochs}epochs-{self.loss}_{self.norm_strategy}_{self.start_date.strftime(self.plot_date_strformat)}_{self.end_date.strftime(self.plot_date_strformat)}{self.suffix}"

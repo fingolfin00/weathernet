@@ -32,6 +32,7 @@
     # acquisition_frequency   = "6h"
     forecast_delta          = 2
     download_path           = "data/ECMWF/" # in work_root_path
+    scaler_name             = "RobustScaler"
 
 [cmcc]
     forecast_path           = "/data/inputs/METOCEAN/rolling/model/atmos/ECMWF/IFS_010/1.0forecast/"
