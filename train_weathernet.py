@@ -11,20 +11,24 @@ from netsutils import WeatherDataset, Common, WeatherUtils
 def train_weathernet():
     # Init data object
     wd = WeatherUtils("weather.toml")
+    wd.setup_logger()
+    wd.log_global_setup()
+    wd.log_train_setup()
     # SSL stuff for cartopy (if ever needed)
     wd.config_ssl_env(Path(sys.executable).parents[1])
     # Model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    wd.logger.info(wd.logger)
     model = wd.Net(
         learning_rate=wd.learning_rate,
         loss=wd.criterion,
         norm=wd.norm, 
         supervised=wd.supervised,
-        debug = wd.debug
+        extra_logger=wd.logger
     ).to(device)
     num_workers = min(os.cpu_count(), 8)  # safe default
     # Tensorboard
-    logger = TensorBoardLogger(wd.run_path+"lightning_logs", name=wd.run_name)
+    tl_logger = TensorBoardLogger(wd.run_path+"lightning_logs", name=wd.run_name)
 
     # Prepare data if necessary
     wd.prepare_data("train")
@@ -48,21 +52,15 @@ def train_weathernet():
     # Create data loaders
     train_dataloader = DataLoader(train_dataset, batch_size=wd.batch_size, num_workers=num_workers)
     validation_dataloader = DataLoader(validation_dataset, batch_size=wd.batch_size, shuffle=False, num_workers=num_workers)
-    for X, y in train_dataloader:
-        print(f"Shape of input  X (forecast) training set [N, C, H, W]: {X.shape}")
-        print(f"Shape of target y (analysis) training set [N, C, H, W]: {y.shape} {y.dtype}")
-        break
-    for X, y in validation_dataloader:
-        print(f"Shape of input  X (forecast) validation set [N, C, H, W]: {X.shape}")
-        print(f"Shape of target y (analysis) validation set [N, C, H, W]: {y.shape} {y.dtype}")
-        break
-    print(f"Using {device} device")
-    print(f"Hyperparamters:")
-    print(f" learning_rate = {wd.learning_rate}")
-    print(f" batch_size    = {wd.batch_size}")
-    print(f" epochs        = {wd.epochs}")
-    print(f" loss          = {wd.loss}")
-    print(f" norm          = {wd.norm_strategy}")
+    # for X, y in train_dataloader:
+    #     print(f"Shape of input  X (forecast) training set [N, C, H, W]: {X.shape}")
+    #     print(f"Shape of target y (analysis) training set [N, C, H, W]: {y.shape} {y.dtype}")
+    #     break
+    # for X, y in validation_dataloader:
+    #     print(f"Shape of input  X (forecast) validation set [N, C, H, W]: {X.shape}")
+    #     print(f"Shape of target y (analysis) validation set [N, C, H, W]: {y.shape} {y.dtype}")
+    #     break
+
 
     # DEBUG if crazy errors show up
     # x, y = next(iter(train_dataloader))
@@ -80,7 +78,7 @@ def train_weathernet():
     #     raise
 
     # Train
-    trainer = L.Trainer(max_epochs=wd.epochs, log_every_n_steps=1, logger=logger)
+    trainer = L.Trainer(max_epochs=wd.epochs, log_every_n_steps=1, logger=tl_logger)
     trainer.fit(model, train_dataloader, validation_dataloader)
     
     # Save model weights

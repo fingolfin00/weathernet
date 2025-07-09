@@ -1,4 +1,4 @@
-import os
+import os, colorlog, logging
 import torch
 torch.set_float32_matmul_precision('medium')
 from torch import optim, nn, utils, Tensor
@@ -9,25 +9,22 @@ from torchmetrics.image import SpatialCorrelationCoefficient
 import lightning as L
 
 class CustomLightningModule (L.LightningModule):
-    def __init__ (self, debug):
+    def __init__ (self, extra_logger):
         super().__init__()
-        self.debug = debug
+        self.extra_logger = extra_logger
 
     def _squeeze_and_add_log_img (self, x, c, n, s, tl):
         if not self.trainer.sanity_checking:
             sq_x = torch.squeeze(x[n:n+1,c:c+1,:,:],0)
-            if self.debug:
-                print(f"[DEBUG] {s} x, squeezed, channel {c}, sample {n}: {sq_x.shape}, x.device: {sq_x.device}")
+            self.extra_logger.debug(f"{s} x, squeezed, channel {c}, sample {n}: {sq_x.shape}, x.device: {sq_x.device}")
             tl.add_image(f"{s} c:{c}, n:{n}", sq_x, self.global_step)
 
     def _print_debug (self, x, s):
-        if self.debug:
-            print(f"[DEBUG] {s} x: {x.shape}, x.device: {x.device}")
+        self.extra_logger.debug(f"{s} x: {x.shape}, x.device: {x.device}")
     
 class ResNetUNetEncoder(CustomLightningModule):
-    def __init__(self, norm, debug):
-        super().__init__(debug=debug)
-        # self.debug = debug
+    def __init__(self, norm, extra_logger):
+        super().__init__(extra_logger=extra_logger)
         # Load base ResNet18 model
         # base_model = models.resnet18(weights=None)
         base_model = models.resnet18(norm_layer=norm)
@@ -76,8 +73,8 @@ class ResNetUNetEncoder(CustomLightningModule):
         return x1, x2, x3, x4 
 
 class ResNetUNetDecoder(CustomLightningModule):
-    def __init__(self, debug):
-        super().__init__(debug=debug)
+    def __init__(self, extra_logger):
+        super().__init__(extra_logger=extra_logger)
         # self.debug = debug
         # Decoder path
         self.decoder4 = self._upsample_block(512, 256)                  # 8x8 or 16x16 -> up
@@ -124,21 +121,22 @@ class ResNetUNetDecoder(CustomLightningModule):
 
 
 class LitAutoEncoder(L.LightningModule):
-    def __init__(self, loss, learning_rate, norm, supervised, debug):
+    def __init__(self, loss, learning_rate, norm, supervised, extra_logger):
         super().__init__()
-        self.encoder = ResNetUNetEncoder(norm=norm, debug=debug)
-        self.decoder = ResNetUNetDecoder(debug=debug)
+        self.extra_logger = extra_logger
+        self.encoder = ResNetUNetEncoder(norm=norm, extra_logger=self.extra_logger)
+        self.decoder = ResNetUNetDecoder(extra_logger=self.extra_logger)
         self.loss = loss
         self.norm = norm
         self.learning_rate = learning_rate
         self.supervised = supervised
         self.test_step_outputs = []
-        print("Trainable parameters:", sum(p.numel() for p in self.parameters() if p.requires_grad))
+        self.extra_logger.info(f"Trainable parameters: {sum(p.numel() for p in self.parameters() if p.requires_grad)}")
 
     def forward(self, x):
         x1, x2, x3, x4 = self.encoder(x)
         output = self.decoder(x1, x2, x3, x4)
-        print(f"[DEBUG] out.max: {output.max()}, in.max: {x.max()}, out.min: {output.min()}, in.min: {x.min()}")
+        self.extra_logger.debug(f"out.max: {output.max()}, in.max: {x.max()}, out.min: {output.min()}, in.min: {x.min()}")
         return output
 
     def training_step(self, batch, batch_idx):
@@ -148,7 +146,7 @@ class LitAutoEncoder(L.LightningModule):
             # x = x.view(x.size(0), -1)
             z1, z2, z3, z4 = self.encoder(x)
             x_hat = self.decoder(z1, z2, z3, z4)
-            # print(f"[DEBUG] x_hat: {x_hat.shape}, x: {x.shape}, x_hat.device: {x_hat.device}, x.device: {x.device}")
+            # self.extra_logger.debug(f"x_hat: {x_hat.shape}, x: {x.shape}, x_hat.device: {x_hat.device}, x.device: {x.device}")
             loss = self.loss(x_hat, y)
         else:
             # Unsupervised
@@ -156,7 +154,7 @@ class LitAutoEncoder(L.LightningModule):
             # x = x.view(x.size(0), -1)
             z1, z2, z3, z4 = self.encoder(x)
             x_hat = self.decoder(z1, z2, z3, z4)
-            # print(f"[DEBUG] x_hat: {x_hat.shape}, x: {x.shape}, x_hat.device: {x_hat.device}, x.device: {x.device}")
+            # self.extra_logger.debug(f"x_hat: {x_hat.shape}, x: {x.shape}, x_hat.device: {x_hat.device}, x.device: {x.device}")
 
             loss = self.loss(x_hat, x)
         # Logging to TensorBoard (if installed) by default
@@ -207,6 +205,6 @@ class LitAutoEncoder(L.LightningModule):
         self.test_MAE = MAE
         self.test_RMSE = RMSE
         self.test_SCC = SCC
-        print(f"MAE: {MAE}")
-        print(f"RMSE: {RMSE}")
-        print(f"SCC: {SCC}")
+        self.extra_logger.info(f"MAE: {MAE}")
+        self.extra_logger.info(f"RMSE: {RMSE}")
+        self.extra_logger.info(f"SCC: {SCC}")

@@ -1,4 +1,4 @@
-import glob, os, sys, torch, datetime, cfgrib, time, toml, importlib
+import glob, os, sys, torch, datetime, cfgrib, time, toml, importlib, colorlog, logging
 from torch import nn
 from torch.utils.data import random_split, Dataset, DataLoader
 import torch.nn.functional as F
@@ -88,7 +88,19 @@ class WeatherUtils:
         self.new_date_strformat      = "%Y%m%d%H%M"
         self.plot_date_strformat     = "%Y%m%d-%H%M"
         self.data_extension          = ".npy.npz"
-        self.debug                   = self.config["global"]["debug"]
+        # Log
+        self.log_level_str           = self.config["global"]["log_level"]
+        self.log_level               = getattr(logging, self.log_level_str.upper())
+        self.logger                  = logging.getLogger(__name__)
+        self.log_folder              = self.run_path + "logs/"
+        self.log_filename            = self.log_folder + self.run_name
+        self.log_format_string       = (
+                                        # '%(log_color)s%(asctime)s [%(levelname)s: %(name)s] %(message)s'
+                                        '%(log_color)s[%(levelname)s]%(reset)s %(name)s: %(message)s'
+                                        # '%(funcName)s:%(lineno)d - %(message)s'
+        )
+        # GPU
+        self.device                  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # Data
         self.var_forecast            = self.config["data"]["var_forecast"]
         self.var_analysis            = self.config["data"]["var_analysis"]
@@ -119,6 +131,7 @@ class WeatherUtils:
         os.makedirs(self.extra_data_folder, exist_ok=True)
         os.makedirs(self.fig_folder, exist_ok=True)
         os.makedirs(self.weights_folder, exist_ok=True)
+        os.makedirs(self.log_folder, exist_ok=True)
         # Suffices for file names
         self.suffix = "_anomaly" if self.anomaly else ""
         self.suffix += "_detrend" if self.detrend else ""
@@ -133,6 +146,66 @@ class WeatherUtils:
         criterion = getattr(nn, self.loss)
         self.criterion = criterion()
         self.norm = getattr(nn, self.norm_strategy)
+
+    def log_global_setup (self):
+        self.logger.info(f"GPU")
+        self.logger.info("---------------------")
+        self.logger.info(f" device             : {self.device}")
+        self.logger.info("=====================")
+        self.logger.info(f"Run")
+        self.logger.info("---------------------")
+        self.logger.info(f" run name           : {self.run_name}")
+        self.logger.info(f" net name           : {self.netname}")
+        self.logger.info(f" log level          : {self.log_level_str}")
+        self.logger.info("=====================")
+        self.logger.info(f"Data")
+        self.logger.info("---------------------")
+        self.logger.info(f" forecast variable  : {self.var_forecast}")
+        self.logger.info(f" analysis variable  : {self.var_analysis}")
+        self.logger.info("=====================")
+        self.logger.info(f"Hyperparameters")
+        self.logger.info("---------------------")
+        self.logger.info(f" learning rate      : {self.learning_rate}")
+        self.logger.info(f" batch size         : {self.batch_size}")
+        self.logger.info(f" epochs             : {self.epochs}")
+        self.logger.info(f" loss               : {self.loss}")
+        self.logger.info(f" norm               : {self.norm_strategy}")
+        self.logger.info(f" lerning strategy   : {self.supervised_str}")
+        self.logger.info("=====================")
+
+    def log_train_setup (self):
+        self.logger.info(f"Training")
+        self.logger.info("---------------------")
+        self.logger.info(f" start date         : {self.start_date}")
+        self.logger.info(f" end date           : {self.end_date}")
+        self.logger.info("=====================")
+
+    def log_test_setup (self):
+        self.logger.info(f"Testing")
+        self.logger.info("---------------------")
+        self.logger.info(f" start date         : {self.test_start_date}")
+        self.logger.info(f" end date           : {self.test_end_date}")
+        self.logger.info("=====================")
+
+    def setup_logger (self):
+        self.logger.setLevel(self.log_level)
+        self.logger.handlers = []  # Clear existing handlers
+        formatter = colorlog.ColoredFormatter(
+            self.log_format_string,
+            log_colors={
+                'DEBUG':    'cyan',
+                'INFO':     'green',
+                'WARNING':  'yellow',
+                'ERROR':    'red',
+                'CRITICAL': 'red,bg_white',
+            },
+        )
+        console_handler = colorlog.StreamHandler()
+        console_handler.setFormatter(formatter)
+        self.logger.addHandler(console_handler)
+        file_handler = logging.FileHandler(self.log_filename)
+        file_handler.setFormatter(formatter)
+        self.logger.addHandler(file_handler)
 
     def _get_base_data_fn (self, start_date, end_date):
         return f"{self.save_data_folder}{self.source}_{self.var_forecast}-{self.var_analysis}_{self.forecast_delta}_{start_date.strftime(self.new_date_strformat)}_{end_date.strftime(self.new_date_strformat)}"
@@ -149,7 +222,7 @@ class WeatherUtils:
         elif type == 'test':
             data_fn = self._get_test_data_fn() + self.data_extension
         else:
-            print(f"ERROR: unsupported type {type}")
+            self.logger.error(f"Unsupported type {type}")
             data_fn = None
         return data_fn
 
@@ -159,11 +232,11 @@ class WeatherUtils:
         os.environ["REQUESTS_CA_BUNDLE"] = str(env_base_path / 'ssl' / 'tls-ca-bundle.pem')
 
     def prepare_data (self, type):
-        print(f"Prepare {type} data")
+        self.logger.info(f"Prepare {type} data")
         data_fn = self._get_data_fn_from_type(type)
         data_f = Path(data_fn)
         if data_f.is_file():
-            print(f"File {data_fn} already exists.")
+            self.logger.warning(f"File {data_fn} already exists.")
             return
         if type == 'train':
             start_date = self.start_date
@@ -174,7 +247,7 @@ class WeatherUtils:
             end_date = self.test_end_date
             coords_d = self.test_start_date
         else:
-            print(f"ERROR: unsupported type {type}")
+            self.logger.error(f"Unsupported type {type}")
             coords_d = None
         # Prepare variables
         if self.source == "ecmwf":
@@ -194,19 +267,19 @@ class WeatherUtils:
             orig_freq = self.config["cmcc"]["origin_frequency"]
             grib_dict = {'cfVarName': self.var_forecast}
         else:
-            print("ERROR: Unsupported source type. Aborting...")
-            quit()
+            self.logger.error("Unsupported source type. Aborting...")
+            return
 
         # Get the data
         date_range = pd.date_range(start=start_date, end=end_date, freq=orig_freq).to_pydatetime().tolist()
-        print(f"Get {self.var_forecast} (forecast), {self.var_analysis} (analysis) from {start_date.strftime(self.print_date_strformat)} to {end_date.strftime(self.print_date_strformat)}")
+        self.logger.info(f"Get {self.var_forecast} (forecast), {self.var_analysis} (analysis) from {start_date.strftime(self.print_date_strformat)} to {end_date.strftime(self.print_date_strformat)}")
         var_d = {}
         for d in date_range:
             forecast_d = d - datetime.timedelta(days=self.forecast_delta)
-            print(f"Analysis: {d}")
-            print(f"Forecast: {forecast_d}")
-            # print(d)
-            # print(forecast_d)
+            self.logger.info(f"Analysis: {d}")
+            self.logger.info(f"Forecast: {forecast_d}")
+            # self.logger.debug(d)
+            # self.logger.debug(forecast_d)
             # acq_range = pd.date_range(start=d, end=d+datetime.timedelta(days=1), freq=acq_freq).to_pydatetime().tolist()
             if self.source == "ecmwf":
                 analysis_path = analysis_root_path
@@ -221,8 +294,8 @@ class WeatherUtils:
                 # analysis_fn_glob = f"{d.strftime(folder_date_strformat)}-ECMWF---AM0100-MEDATL-b{d.strftime(folder_date_strformat)}_an{h.strftime("%M")}-fv11.00.nc"
                 forecast_fn_glob = f"{head_forecast_fn}{forecast_d.strftime(self.forecast_date_strformat)}{d.strftime(self.forecast_date_strformat)}*"
             
-            # print(forecast_fn_glob)
-            # print(analysis_fn_glob)
+            # self.logger.debug(forecast_fn_glob)
+            # self.logger.debug(analysis_fn_glob)
             errormsg = None
             nearest_forecast_flag = False
             try:
@@ -235,28 +308,28 @@ class WeatherUtils:
                     plus1h_d = d + datetime.timedelta(hours=1)
                     forecast_minus1h_fn_glob = f"{head_forecast_fn}{forecast_d.strftime(self.forecast_date_strformat)}{minus1h_d.strftime(self.forecast_date_strformat)}*"
                     forecast_plus1h_fn_glob = f"{head_forecast_fn}{forecast_d.strftime(self.forecast_date_strformat)}{plus1h_d.strftime(self.forecast_date_strformat)}*"
-                    print("Try nearest +-1h forecasts...")
+                    self.logger.info("Try nearest +-1h forecasts...")
                     try:
                         forecast_minus1h_fn = glob.glob(forecast_path + forecast_minus1h_fn_glob)[0]
                         forecast_plus1h_fn = glob.glob(forecast_path + forecast_plus1h_fn_glob)[0]
                         nearest_forecast_flag = True
                     except:
-                        print(f"ERROR: {errormsg}")
+                        self.logger.error(f"{errormsg}")
                         errormsg = f"Couldn't find forecast -1h file {forecast_path + forecast_minus1h_fn_glob}"
-                        print(f"ERROR: {errormsg}")
+                        self.logger.error(f"{errormsg}")
                         errormsg = f"Couldn't find forecast +1h file {forecast_path + forecast_plus1h_fn_glob}"
-                        print(f"ERROR: {errormsg}. Skipping...")
+                        self.logger.error(f"{errormsg}. Skipping...")
                         continue
-                # print(f"ERROR: {errormsg}. Skipping...")
+                # self.logger.error(f"{errormsg}. Skipping...")
                 continue
             try:
                 analysis_fn = glob.glob(analysis_path + analysis_fn_glob)[0]
             except:
                 errormsg = f"Couldn't find analysis file {analysis_path + analysis_fn_glob}"
-                print(f"ERROR: {errormsg}. Skipping...")
+                self.logger.error(f"{errormsg}. Skipping...")
                 continue
             try:
-                print(analysis_fn)
+                self.logger.info(analysis_fn)
                 ds_analysis = xr.open_dataset(
                     analysis_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
                     backend_kwargs={'filter_by_keys': grib_dict}
@@ -264,10 +337,10 @@ class WeatherUtils:
                 # ds_analysis = nc.Dataset(analysis_fn)
             except:
                 errormsg = f"Couldn't open analysis file {analysis_fn}"
-                print(f"ERROR: {errormsg}. Skipping...")
+                self.logger.error(f"{errormsg}. Skipping...")
                 continue
             try:
-                print(forecast_fn)
+                self.logger.info(forecast_fn)
                 if nearest_forecast_flag:
                     ds_forecast_minus1h = xr.open_dataset(
                         forecast_minus1h_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
@@ -288,7 +361,7 @@ class WeatherUtils:
                 # ds_forecast = cfgrib.open_datasets(forecast_fn, indexpath="/tmp/tempgrib.{short_hash}.idx")
             except:
                 errormsg = f"Couldn't open forecast file {forecast_fn}"
-                print(f"ERROR: {errormsg}. Skipping...")
+                self.logger.error(f"{errormsg}. Skipping...")
                 continue
             try:
                 var_d[d] = {
@@ -297,7 +370,7 @@ class WeatherUtils:
                     'analysis': ds_analysis.variables[self.var_analysis].values
                 }
             except:
-                print(f"ERROR: Data not available. Skipping...")
+                self.logger.error(f"Data not available. Skipping...")
         
         # Get coordinate data        
         if self.source == "ecmwf":
@@ -348,7 +421,7 @@ class WeatherUtils:
         var_d['lev']['forecast'] = lev_fc_full
         
         # Save data
-        print(f"Saving data in {data_fn}")
+        self.logger.info(f"Saving data in {data_fn}")
         with open(f"{data_fn}", 'wb') as f:
             np.savez(f"{data_fn}", var_d, allow_pickle=True)
 
@@ -361,7 +434,7 @@ class WeatherUtils:
         data_fn = self._get_data_fn_from_type(type)
         average_data_fn = self._get_average_fn(model)
         trend_data_fn = self._get_trend_fn(model)
-        print(f"Loading {type} data from {data_fn}")
+        self.logger.info(f"Loading {type} data from {data_fn}")
         with open(f"{data_fn}", 'rb') as f:
             var_d = np.load(f, allow_pickle=True)['arr_0'].item()
         
@@ -372,10 +445,10 @@ class WeatherUtils:
         lat_fc_full = var_d['lat']['forecast']
         lev_fc_full = var_d['lev']['forecast']
         
-        print(f"lon_an[0], lon_an[-1]: {lon_an_full[0]}, {lon_an_full[-1]}")
-        print(f"lon_fc[0], lon_fc[-1]: {lon_fc_full[0]}, {lon_fc_full[-1]}")
-        print(f"lat_an[0], lat_an[-1]: {lat_an_full[0]}, {lat_an_full[-1]}")
-        print(f"lat_fc[0], lat_fc[-1]: {lat_fc_full[0]}, {lat_fc_full[-1]}")
+        self.logger.debug(f"lon_an[0], lon_an[-1]: {lon_an_full[0]}, {lon_an_full[-1]}")
+        self.logger.debug(f"lon_fc[0], lon_fc[-1]: {lon_fc_full[0]}, {lon_fc_full[-1]}")
+        self.logger.debug(f"lat_an[0], lat_an[-1]: {lat_an_full[0]}, {lat_an_full[-1]}")
+        self.logger.debug(f"lat_fc[0], lat_fc[-1]: {lat_fc_full[0]}, {lat_fc_full[-1]}")
         lonfin = self.lonfin
         latfin = self.latfin
         lonini_fc_idx = (np.abs(lon_fc_full - self.lonini)).argmin()
@@ -390,14 +463,14 @@ class WeatherUtils:
         lev_forecast = (np.abs(lev_fc_full - self.levhpa)).argmin()
         
         if self.size_an:
-            print(f"Selected regular square size for analysis: {self.size_an}x{self.size_an}")
-            print(f"Ignoring latfin: {latfin} and lonfin: {lonfin}")
-            # print(f"Lonfin before adding size_an: {lonfin_an_idx}")
-            # print(f"Latfin before adding size_an: {latfin_an_idx}")
+            self.logger.info(f"Selected regular square size for analysis: {self.size_an}x{self.size_an}")
+            self.logger.info(f"Ignoring latfin: {latfin} and lonfin: {lonfin}")
+            self.logger.debug(f"Lonfin before adding size_an: {lonfin_an_idx}")
+            self.logger.debug(f"Latfin before adding size_an: {latfin_an_idx}")
             lonfin_an_idx = lonini_an_idx + self.size_an
             latfin_an_idx = latini_an_idx + self.size_an
-            # print(f"Lonfin after adding size_an: {lonfin_an_idx}")
-            # print(f"Latfin after adding size_an: {latfin_an_idx}")
+            self.logger.debug(f"Lonfin after adding size_an: {lonfin_an_idx}")
+            self.logger.debug(f"Latfin after adding size_an: {latfin_an_idx}")
             lonfin = lon_an_full[lonfin_an_idx]
             latfin = lat_an_full[latfin_an_idx]
             lonfin_fc_idx = (np.abs(lon_fc_full - lonfin)).argmin()
@@ -408,14 +481,14 @@ class WeatherUtils:
         self.lonan = lon_an_full[lonini_an_idx:lonfin_an_idx]
         self.latan = lat_an_full[latini_an_idx:latfin_an_idx]
         
-        print(f"lat ini {self.latini}, lat fin {latfin} (forecast ds) = {latini_fc_idx}, {latfin_fc_idx}")
-        print(f"lat ini {self.latini}, lat fin {latfin} (analysis ds) = {latini_an_idx}, {latfin_an_idx}")
-        print(f"lon ini {self.lonini}, lon fin {lonfin} (forecast ds) = {lonini_fc_idx}, {lonfin_fc_idx}")
-        print(f"lon ini {self.lonini}, lon fin {lonfin} (analysis ds) = {lonini_an_idx}, {lonfin_an_idx}")
-        print(f"lev {self.levhpa} (analysis ds) = {lev_analysis}")
-        print(f"lev {self.levhpa} (forecast ds) = {lev_forecast}")
-        print(f"Full {self.var_forecast} shape: {var_d[next(iter(var_d))]['forecast'].shape}")
-        print(f"Full {self.var_analysis} shape: {var_d[next(iter(var_d))]['analysis'].shape}")
+        self.logger.info(f"lat ini {self.latini}, lat fin {latfin} (forecast ds) = {latini_fc_idx}, {latfin_fc_idx}")
+        self.logger.info(f"lat ini {self.latini}, lat fin {latfin} (analysis ds) = {latini_an_idx}, {latfin_an_idx}")
+        self.logger.info(f"lon ini {self.lonini}, lon fin {lonfin} (forecast ds) = {lonini_fc_idx}, {lonfin_fc_idx}")
+        self.logger.info(f"lon ini {self.lonini}, lon fin {lonfin} (analysis ds) = {lonini_an_idx}, {lonfin_an_idx}")
+        self.logger.info(f"lev {self.levhpa} (analysis ds) = {lev_analysis}")
+        self.logger.info(f"lev {self.levhpa} (forecast ds) = {lev_forecast}")
+        self.logger.info(f"Full {self.var_forecast} shape: {var_d[next(iter(var_d))]['forecast'].shape}")
+        self.logger.info(f"Full {self.var_analysis} shape: {var_d[next(iter(var_d))]['analysis'].shape}")
 
         # Lists to hold all samples
         forecast_data = []
@@ -433,14 +506,14 @@ class WeatherUtils:
                 elif len(analysis.shape) == 2:
                     analysis = analysis[latini_an_idx:latfin_an_idx,lonini_an_idx:lonfin_an_idx]
                 else:
-                    print(f"ERROR: unsupported dimensions {analysis.shape} for {self.var_analysis}")
+                    self.logger.error(f"Unsupported dimensions {analysis.shape} for {self.var_analysis}")
             
                 if len(forecast.shape) == 3:
                     forecast = forecast[lev_forecast,latini_fc_idx:latfin_fc_idx,lonini_fc_idx:lonfin_fc_idx]
                 elif len(forecast.shape) == 2:
                     forecast = forecast[latini_fc_idx:latfin_fc_idx,lonini_fc_idx:lonfin_fc_idx]
                 else:
-                    print(f"ERROR: unsupported dimensions {forecast.shape} for {self.var_forecast}")
+                    self.logger.error(f"Unsupported dimensions {forecast.shape} for {self.var_forecast}")
             
                 # if self.anomaly:
                 #     forecast = np.mean(forecast) - forecast
@@ -459,46 +532,43 @@ class WeatherUtils:
         # Prune data of unwanted datapoints if required
         errs = y_np - X_np
         mean_errs = errs.mean(axis=(2,3))[:,0]
-        print(f"Average an-fc error: {errs.mean()}")
-        if self.debug:
-            print("[DEBUG] Mean errors for each timestep:")
-            print(mean_errs)
+        self.logger.info(f"Average an-fc error: {errs.mean()}")
+        self.logger.debug("Mean errors for each timestep:")
+        self.logger.debug(mean_errs)
         dates = np.array([x for x in list(var_d.keys()) if x not in ['lon', 'lat', 'lev']])
         if self.error_limit:
-            # print(f"Indices where fc-an<-{self.error_limit}: {np.argwhere(mean_errs < -self.error_limit)}")
-            # print(f"Indices where fc-an>{self.error_limit}: {np.argwhere(mean_errs > self.error_limit)}") 
             condition = (mean_errs > self.error_limit).astype(bool) | (mean_errs < -self.error_limit).astype(bool)
             full_dates = dates.copy()
             dates = np.delete(dates, condition)
             X_np  = np.delete(X_np, condition, axis=0)
             y_np  = np.delete(y_np, condition, axis=0)
-            if self.debug:
-                print(f"[DEBUG] Full timesteps where an-fc >  {self.error_limit}:")
-                print(f"{full_dates[(mean_errs > self.error_limit).astype(bool)]}")
-                print("[DEBUG]  max values:")
-                print(f"{mean_errs[(mean_errs > self.error_limit).astype(bool)]}")
-                print(f"[DEBUG] Full timepsteps where an-fc < -{self.error_limit}:")
-                print(f"{full_dates[(mean_errs < -self.error_limit).astype(bool)]}")
-                print("[DEBUG]  min values:")
-                print(f"{mean_errs[(mean_errs < -self.error_limit).astype(bool)]}")
-                pruned_mean_errs = np.delete(mean_errs, condition)
-                print(f"[DEBUG] Pruned timesteps where an-fc >  {self.error_limit}:")
-                print(f"{dates[(pruned_mean_errs > self.error_limit).astype(bool)]}")
-                print(f"[DEBUG] Pruned timepsteps where an-fc < -{self.error_limit}:")
-                print(f"{dates[(pruned_mean_errs < -self.error_limit).astype(bool)]}")
+            self.logger.debug(f"Full timesteps where an-fc >  {self.error_limit}:")
+            self.logger.debug(f"{full_dates[(mean_errs > self.error_limit).astype(bool)]}")
+            self.logger.debug(" max values:")
+            self.logger.debug(f"{mean_errs[(mean_errs > self.error_limit).astype(bool)]}")
+            self.logger.debug(f"Full timepsteps where an-fc < -{self.error_limit}:")
+            self.logger.debug(f"{full_dates[(mean_errs < -self.error_limit).astype(bool)]}")
+            self.logger.debug(" min values:")
+            self.logger.debug(f"{mean_errs[(mean_errs < -self.error_limit).astype(bool)]}")
+            pruned_mean_errs = np.delete(mean_errs, condition)
+            self.logger.info(f"Average an-fc error (after pruning): {pruned_mean_errs.mean()}")
+            self.logger.debug(f"Pruned timesteps where an-fc >  {self.error_limit}:")
+            self.logger.debug(f"{dates[(pruned_mean_errs > self.error_limit).astype(bool)]}")
+            self.logger.debug(f"Pruned timepsteps where an-fc < -{self.error_limit}:")
+            self.logger.debug(f"{dates[(pruned_mean_errs < -self.error_limit).astype(bool)]}")
         
         average_data_path = f"{self.extra_data_folder}{average_data_fn}"
         if type == 'train':
-            print(f"Save training period average in {average_data_fn}")
+            self.logger.info(f"Save training period average in {average_data_fn}")
             average_fc = X_np.mean(axis=0, keepdims=True)
             average_an = y_np.mean(axis=0, keepdims=True)
-            # print(f"average_fc shape: {np.shape(average_fc)}")
+            # self.logger.debug(f"average_fc shape: {np.shape(average_fc)}")
             average_d = {"forecast": average_fc, "analysis": average_an}
             with open(average_data_path, 'wb') as f:
                 np.savez(average_data_path, average_d, allow_pickle=True)
         elif type == 'test':
             # Load anomaly data
-            print(f"Load training period average from {average_data_fn}")
+            self.logger.info(f"Load training period average from {average_data_fn}")
             average_d = self.get_averages_from_fn(average_data_path)
             average_fc = average_d["forecast"]
             average_an = average_d["analysis"]
@@ -508,7 +578,7 @@ class WeatherUtils:
         
         if self.detrend:
             # Load trend data
-            print(f"Loading trend from {trend_data_fn}")
+            self.logger.info(f"Loading trend from {trend_data_fn}")
             with open(f"{trend_data_fn}", 'rb') as f:
                 trend_d = np.load(f, allow_pickle=True)['arr_0'].item()
                 slopes_fc, intercepts_fc = trend_d['slopes']['forecast'], trend_d['intercepts']['forecast']
@@ -524,25 +594,25 @@ class WeatherUtils:
     def normalize (self, data):
         # Remove channel dimension (channel number C is always 1)
         N, C, H, W = np.shape(data)
-        print(f"[DEBUG] Data before normalization: {np.shape(data)}")
+        self.logger.debug(f"Data before normalization: {np.shape(data)}")
         data = np.squeeze(data, axis=1)
         # Reshape along samples N
         data = data.reshape(H, -1)
-        print(f"[DEBUG] Reshaped data before normalization: {np.shape(data)}")
+        self.logger.debug(f"Reshaped data before normalization: {np.shape(data)}")
         scaler = self.Scaler().fit(data)
         scaled_data = scaler.transform(data)
-        print(f"[DEBUG] Data after normalization: {np.shape(scaled_data)}")
+        self.logger.debug(f"Data after normalization: {np.shape(scaled_data)}")
         scaled_data = scaled_data.reshape(N, C, H, W)
-        print(f"[DEBUG] Reshaped data after normalization: {np.shape(scaled_data)}")
+        self.logger.debug(f"Reshaped data after normalization: {np.shape(scaled_data)}")
         return scaled_data, scaler
 
     def denormalize (self, scaled_data, scaler):
-        print(f"[DEBUG] Data before denormalization: {np.shape(scaled_data)}")
+        self.logger.debug(f"Data before denormalization: {np.shape(scaled_data)}")
         N, C, H, W = np.shape(scaled_data)
         scaled_data = np.squeeze(scaled_data, axis=1)
         # Reshape along samples N
         scaled_data = scaled_data.reshape(H, -1)
-        print(f"[DEBUG] Reshaped data before denormalization: {np.shape(scaled_data)}")
+        self.logger.debug(f"Reshaped data before denormalization: {np.shape(scaled_data)}")
         data = scaler.inverse_transform(scaled_data)
         data = data.reshape(N, C, H, W)
         return data
@@ -564,7 +634,7 @@ class WeatherUtils:
         
     def save_weights (self, model):
         weights_fn = self.get_weights_fn(model)
-        print(f"Save weights in file: {weights_fn}")
+        self.logger.info(f"Save weights in file: {weights_fn}")
         torch.save(model.state_dict(), f"{self.weights_folder}{weights_fn}")
 
     def _create_cartopy_axis (
@@ -576,8 +646,8 @@ class WeatherUtils:
             projection=ccrs.PlateCarree()
         )
         ax.set_title(title)
-        if self.debug:
-            print(f"[DEBUG] {title}: vmin = {vmin_plt}, vmax = {vmax_plt}, vcenter = {vcenter_plt}")
+        self.logger.debug(f"Ax ({rows}, {cols}, {n}) title: {title}")
+        self.logger.debug(f" vmin: {vmin_plt}, vmax: {vmax_plt}, vcenter: {vcenter_plt}")
         im = ax.pcolormesh(self.lonan, self.latan,
                            var,
                            norm=TwoSlopeNorm(vmin=vmin_plt, vmax=vmax_plt, vcenter=vcenter_plt), cmap=cmap,
@@ -628,7 +698,7 @@ class WeatherUtils:
         prediction = outputs
         
         # Plot forecast, analysis, and prediction error
-        print(f"Plot one forecast {sample_forecast.shape}, analysis {sample_analysis.shape} and prediction {prediction.shape} in {date.strftime(self.plot_date_strformat)}.")
+        self.logger.info(f"Plot one forecast {sample_forecast.shape}, analysis {sample_analysis.shape} and prediction {prediction.shape} in {date.strftime(self.plot_date_strformat)}.")
         fig = plt.figure(figsize=(12, 18)) # col, row
         
         if len(sample_forecast.shape) == 3:
@@ -636,26 +706,30 @@ class WeatherUtils:
         elif len(sample_forecast.shape) == 2:
             plot_sample_fc = sample_forecast
         else:
-            print(f"ERROR: unsupported dimensions {sample_forecast.shape} for sample_forecast")
+            self.logger.error(f"Unsupported dimensions {sample_forecast.shape} for sample_forecast")
         if len(sample_analysis.shape) == 3:
             plot_sample_an = sample_analysis[-1,:,:]
         elif len(sample_forecast.shape) == 2:
             plot_sample_an = sample_analysis
         else:
-            print(f"ERROR: unsupported dimensions {sample_analysis.shape} for sample_analysis")
+            self.logger.error(f"Unsupported dimensions {sample_analysis.shape} for sample_analysis")
         if len(prediction.shape) == 3:
             plot_pred = prediction[-1,:,:]
         elif len(sample_forecast.shape) == 2:
             plot_pred = prediction
         else:
-            print(f"ERROR: unsupported dimensions {prediction.shape} for prediction")
+            self.logger.error(f"Unsupported dimensions {prediction.shape} for prediction")
         if len(average_an.shape) == 3:
             plot_average_an = average_an[-1,:,:]
         elif len(average_an.shape) == 2:
             plot_average_an = average_an
         else:
-            print(f"ERROR: unsupported dimensions {average_an.shape} for average analysis")
-        # print(plot_average_an.shape)
+            self.logger.error(f"Unsupported dimensions {average_an.shape} for average analysis")
+        self.logger.debug("Plot shapes")
+        self.logger.debug(f" sample forecast  : {plot_sample_fc.shape}")
+        self.logger.debug(f" sample analysis  : {plot_sample_an.shape}")
+        self.logger.debug(f" prediction       : {plot_pred.shape}")
+        self.logger.debug(f" average analysis : {plot_average_an.shape}")
         # vmin_plt = np.min([np.min(plot_sample_fc), np.min(plot_sample_an), np.min(plot_pred)])
         # vmax_plt = np.max([np.max(plot_sample_fc), np.max(plot_sample_an), np.min(plot_pred)])
         vmin_plt = np.min([np.min(plot_sample_fc), np.min(plot_sample_an)])
@@ -706,7 +780,7 @@ class WeatherUtils:
         elif len(error_pred.shape) == 2:
             plot_err = error_pred
         else:
-            print(f"ERROR: unsupported dimensions {error_pred.shape} for error")
+            self.logger.error(f"Unsupported dimensions {error_pred.shape} for error")
         ax4 = self._create_cartopy_axis (fig, 3, 2, 6, 'Prediction Error' + title_details, plot_err, vmin_plt, vmax_plt, vcenter_plt, self.cmap_error)
 
         # Forecast error
@@ -715,7 +789,7 @@ class WeatherUtils:
         elif len(error_fc.shape) == 2:
             plot_err = error_fc
         else:
-            print(f"ERROR: unsupported dimensions {error_fc.shape} for error")
+            self.logger.error(f"Unsupported dimensions {error_fc.shape} for error")
         ax5 = self._create_cartopy_axis (fig, 3, 2, 4, 'Forecast Error' + title_details, plot_err, vmin_plt, vmax_plt, vcenter_plt, self.cmap_error)
         
         plt.tight_layout()

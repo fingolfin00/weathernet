@@ -10,6 +10,8 @@ from netsutils import WeatherDataset, Common, WeatherUtils
 def test_weathernet():
     # Init data object
     wd = WeatherUtils("weather.toml")
+    wd.log_global_setup()
+    wd.log_train_setup()
     # SSL stuff for cartopy
     wd.config_ssl_env(Path(sys.executable).parents[1])
     # Model
@@ -19,7 +21,7 @@ def test_weathernet():
         loss=wd.criterion,
         norm=wd.norm, 
         supervised=wd.supervised,
-        debug = wd.debug
+        extra_logger=wd.logger
     ).to(device)
     num_workers = min(os.cpu_count(), 8)  # safe default
 
@@ -38,13 +40,13 @@ def test_weathernet():
     
     # Create data loaders
     test_dataloader = DataLoader(test_dataset, batch_size=1, num_workers=num_workers, shuffle=False)
-    for X, y in test_dataloader:
-        print(f"Shape of X [N, C, H, W]: {X.shape}")
-        print(f"Shape of y: {y.shape} {y.dtype}")
-        break
+    # for X, y in test_dataloader:
+    #     print(f"Shape of X [N, C, H, W]: {X.shape}")
+    #     print(f"Shape of y: {y.shape} {y.dtype}")
+    #     break
     
     # Load weights
-    print(f"Load weights from file: {wd.get_weights_fn(model)}")
+    wd.logger.info(f"Load weights from file: {wd.get_weights_fn(model)}")
     model.load_state_dict(torch.load(f"{wd.weights_folder}{wd.get_weights_fn(model)}", map_location=device))
 
     trainer = L.Trainer(max_epochs=wd.epochs, log_every_n_steps=1)
