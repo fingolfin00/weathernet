@@ -13,6 +13,7 @@
 [data]
     var_forecast            = "gh" # "t"    "u10"
     var_analysis            = "gh" # "T2M"  "U10M"
+    error_limit             = 0 # 0 means no error limit
     levhpa                  = 500
     # Nord Atlantic box
     lonini                  = -55
