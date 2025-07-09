@@ -1,0 +1,7 @@
+Things to do
+
+1. Add support for multiple hyperparameters
+2. Logging with logging library
+3. Fix scaling # DONE
+4. When preparing data check if already prepared dataset is present # DONE
+5. Add argparse to prepare_weather_data to select train or test (or remove the selection don't know) # DONE
