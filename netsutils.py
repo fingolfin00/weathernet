@@ -576,6 +576,8 @@ class WeatherUtils:
             projection=ccrs.PlateCarree()
         )
         ax.set_title(title)
+        if self.debug:
+            print(f"[DEBUG] {title}: vmin = {vmin_plt}, vmax = {vmax_plt}, vcenter = {vcenter_plt}")
         im = ax.pcolormesh(self.lonan, self.latan,
                            var,
                            norm=TwoSlopeNorm(vmin=vmin_plt, vmax=vmax_plt, vcenter=vcenter_plt), cmap=cmap,
@@ -610,7 +612,7 @@ class WeatherUtils:
 
         return ax
 
-    def plot_figures (self, model, date, inputs, targets, outputs, X_max, X_min, y_max, y_min):
+    def plot_figures (self, model, date, inputs, targets, outputs):
         average_data_fn = self._get_average_fn(model)
         average_data_path = f"{self.extra_data_folder}{average_data_fn}"
         average_d = self.get_averages_from_fn(average_data_path)
@@ -618,9 +620,12 @@ class WeatherUtils:
         average_fc = np.squeeze(average_d["forecast"], axis=1)
         average_an = np.squeeze(average_d["analysis"], axis=1)
         # Remove channel dimension and denormalize, shape becomes (H, W)
-        sample_forecast = Common.denormalize(inputs.cpu().squeeze().numpy(), X_max, X_min)
-        sample_analysis = Common.denormalize(targets.cpu().squeeze().numpy(), y_max, y_min)
-        prediction = Common.denormalize(outputs.cpu().squeeze().numpy(), y_max, y_min)
+        # sample_forecast = self.denormalize(inputs.cpu().numpy(), fc_scaler)
+        # sample_analysis = self.denormalize(targets.cpu().numpy(), an_scaler)
+        # prediction = self.denormalize(outputs.cpu().numpy(), fc_scaler)
+        sample_forecast = inputs
+        sample_analysis = targets
+        prediction = outputs
         
         # Plot forecast, analysis, and prediction error
         print(f"Plot one forecast {sample_forecast.shape}, analysis {sample_analysis.shape} and prediction {prediction.shape} in {date.strftime(self.plot_date_strformat)}.")
@@ -651,10 +656,12 @@ class WeatherUtils:
         else:
             print(f"ERROR: unsupported dimensions {average_an.shape} for average analysis")
         # print(plot_average_an.shape)
-        vmin_plt = np.min([np.min(plot_sample_fc), np.min(plot_sample_an), np.min(plot_pred)])
-        vmax_plt = np.max([np.max(plot_sample_fc), np.max(plot_sample_an), np.min(plot_pred)])
+        # vmin_plt = np.min([np.min(plot_sample_fc), np.min(plot_sample_an), np.min(plot_pred)])
+        # vmax_plt = np.max([np.max(plot_sample_fc), np.max(plot_sample_an), np.min(plot_pred)])
+        vmin_plt = np.min([np.min(plot_sample_fc), np.min(plot_sample_an)])
+        vmax_plt = np.max([np.max(plot_sample_fc), np.max(plot_sample_an)])
         if self.anomaly:
-            vcenter_plt = 0
+            vcenter_plt = 0 if vmin_plt < 0 and vmax_plt > 0 else vmin_plt+(vmax_plt-vmin_plt)/2
             cmap = self.cmap_anomaly
         else:
             vcenter_plt = vmin_plt+(vmax_plt-vmin_plt)/2
@@ -683,14 +690,15 @@ class WeatherUtils:
         error_fc = plot_sample_an - plot_sample_fc
         vmin_plt = np.min(error_fc)
         vmax_plt = np.max(error_fc)
+        vcenter_plt = 0 if vmin_plt < 0 and vmax_plt > 0 else vmin_plt+(vmax_plt-vmin_plt)/2
         # vcenter_plt = vmin_plt+(vmax_plt-vmin_plt)/2
-        vcenter_plt = 0
+
         # Error (Analysis - Prediction)
         error_pred = plot_sample_an - plot_pred
         # vmin_plt = np.min(error_pred)
         # vmax_plt = np.max(error_pred)
         # # vcenter_plt = vmin_plt+(vmax_plt-vmin_plt)/2
-        vcenter_plt = 0
+        # vcenter_plt = 0
 
         # Pred error
         if len(error_pred.shape) == 3:
