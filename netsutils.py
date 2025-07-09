@@ -159,6 +159,10 @@ class WeatherUtils:
     def prepare_data (self, type):
         print(f"Prepare {type} data")
         data_fn = self._get_data_fn_from_type(type)
+        data_f = Path(data_fn)
+        if data_f.is_file():
+            print(f"File {data_fn} already exists.")
+            return
         if type == 'train':
             start_date = self.start_date
             end_date = self.end_date
