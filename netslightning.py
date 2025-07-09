@@ -34,7 +34,7 @@ class ResNetUNetEncoder(CustomLightningModule):
 
         # Replace first conv layer for single-channel input (grayscale)
         self.encoder_conv1 = nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1, bias=False)
-        self.encoder_norm = base_model.bn1  # batch norm -> instance norm
+        self.encoder_norm = base_model.bn1  # batch norm -> selected norm in weather.toml
         
         self.encoder_relu = base_model.relu
         self.encoder_maxpool = base_model.maxpool  # downsample: 128 -> 64, or 256 -> 128
@@ -138,6 +138,7 @@ class LitAutoEncoder(L.LightningModule):
     def forward(self, x):
         x1, x2, x3, x4 = self.encoder(x)
         output = self.decoder(x1, x2, x3, x4)
+        print(f"[DEBUG] out.max: {output.max()}, in.max: {x.max()}, out.min: {output.min()}, in.min: {x.min()}")
         return output
 
     def training_step(self, batch, batch_idx):
@@ -156,6 +157,7 @@ class LitAutoEncoder(L.LightningModule):
             z1, z2, z3, z4 = self.encoder(x)
             x_hat = self.decoder(z1, z2, z3, z4)
             # print(f"[DEBUG] x_hat: {x_hat.shape}, x: {x.shape}, x_hat.device: {x_hat.device}, x.device: {x.device}")
+
             loss = self.loss(x_hat, x)
         # Logging to TensorBoard (if installed) by default
         self.log("train_loss", loss, prog_bar=True)
