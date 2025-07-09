@@ -1,5 +1,6 @@
 import torch, sys, os
 import pandas as pd
+import numpy as np
 from torch import nn
 from pathlib import Path
 from torch.utils.data import random_split, Dataset, DataLoader
@@ -21,13 +22,17 @@ def test_weathernet():
         debug = wd.debug
     ).to(device)
     num_workers = min(os.cpu_count(), 8)  # safe default
-    
+
+    # Prepare data if necessary
+    wd.prepare_data("test")
     # Load data for testing
-    X_np_test, y_np_test = wd.load_data(model, 'test')
+    X_np_test, y_np_test, date_range = wd.load_data(model, 'test')
     
     # Normalize data
-    X_np_test, X_max, X_min = Common.normalize(X_np_test)
-    y_np_test, y_max, y_min = Common.normalize(y_np_test)
+    # X_np_test, X_max, X_min = Common.rescale(X_np_test)
+    # y_np_test, y_max, y_min = Common.rescale(y_np_test)
+    X_np_test, X_scaler = wd.normalize(X_np_test)
+    y_np_test, y_scaler = wd.normalize(y_np_test)
     
     test_dataset = WeatherDataset(X_np_test, y_np_test)
     
@@ -40,7 +45,7 @@ def test_weathernet():
     
     # Load weights
     print(f"Load weights from file: {wd.get_weights_fn(model)}")
-    model.load_state_dict(torch.load(f"{wd.weights_fld}{wd.get_weights_fn(model)}", map_location=device))
+    model.load_state_dict(torch.load(f"{wd.weights_folder}{wd.get_weights_fn(model)}", map_location=device))
 
     trainer = L.Trainer(max_epochs=wd.epochs, log_every_n_steps=1)
     output_d = trainer.test(model, dataloaders=test_dataloader)
@@ -53,14 +58,22 @@ def test_weathernet():
     # Diffusion
     # all_outputs = torch.cat([r[0]["x0_recon"] for r in output_d], dim=0)
     # outputs = all_outputs[-1]['x0_recon']
-    inputs, targets = [], []
-    for input, target in test_dataloader: # input=forecast, target=analysis + x days
-        inputs.append(input.to(device))
-        targets.append(target.to(device))
+    inputs, targets, outputs = [], [], []
+    for idx, (input, target) in enumerate(test_dataloader): # input=forecast, target=analysis + x days
+        inputs.append(input[0,:,:,:].cpu())
+        targets.append(target[0,:,:,:].cpu())
+        outputs.append(all_outputs[idx]['preds'][0,:,:,:])
+    
+    # Denormalize
+    inputs = wd.denormalize(np.array(inputs), X_scaler)
+    targets = wd.denormalize(np.array(targets), y_scaler)
+    predictions = wd.denormalize(np.array(outputs), X_scaler)
+    # predictions = wd.denormalize(outputs.cpu().numpy(), X_scaler)
+    
+    # Plot
     date_range = pd.date_range(start=wd.test_start_date, end=wd.test_end_date, freq=wd.config[wd.source]["origin_frequency"]).to_pydatetime().tolist()
-    for idx, (date, i, t) in enumerate(zip(date_range, inputs, targets)):
-        o = all_outputs[idx]['preds']
-        wd.plot_figures(model, date, i, t, o, X_max, X_min, y_max, y_min)
+    for idx, (date, i, t, o) in enumerate(zip(date_range, inputs, targets, predictions)):
+        wd.plot_figures(model, date, i, t, o)
         
     # inputs, targets = test_dataloader
     
