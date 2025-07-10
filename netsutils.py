@@ -95,7 +95,7 @@ class WeatherConfig:
 
 
 class WeatherRun:
-    def __init__ (self, weather_config, hyper, run):
+    def __init__ (self, weather_config, hyper, run, dryrun=False):
         # User configuration
         self.config                  = weather_config.config
         # Global
@@ -116,9 +116,10 @@ class WeatherRun:
         self.new_date_strformat      = "%Y%m%d%H%M"
         self.plot_date_strformat     = "%Y%m%d-%H%M"
         self.data_extension          = ".npy.npz"
-        self.extra_data_folder       = self.run_path + self.config["global"]["extra_data_path"]
+        # self.extra_data_folder       = self.run_path + self.config["global"]["extra_data_path"]
         self.fig_folder              = self.run_path + self.config["global"]["figure_path"]
         self.weights_folder          = self.run_path + self.config["global"]["weights_path"]
+        self.non_sample_keys         = ['lon', 'lat', 'lev', 'samples', 'missed']
         # Log
         self.log_level_str           = self.config["global"]["log_level"]
         self.log_level               = getattr(logging, self.log_level_str.upper())
@@ -129,8 +130,12 @@ class WeatherRun:
         )
         self.log_format_string       = ('[%(asctime)s %(levelname)s] %(name)s: %(message)s')
         self.logger                  = logging.getLogger(__name__)
-        self.log_folder              = self.run_path + "logs/"
-        self.log_filename            = self.log_folder + self.run_name + ".log"
+        if dryrun:
+            self.log_folder          = self.run_base_path
+            self.log_filename        = self.log_folder + "combo.log"
+        else:
+            self.log_folder          = self.run_path + "logs/"
+            self.log_filename        = self.log_folder + self.run_name + ".log"
         self.tl_root_logdir          = self.run_root_path
         self.tl_logdir               = f"{self.tl_root_logdir}{self.run_base_name}/lightning_logs/"
         # GPU
@@ -164,12 +169,13 @@ class WeatherRun:
         self.suffix = "_anomaly" if self.anomaly else ""
         self.suffix += "_detrend" if self.detrend else ""
         # Make folders if necessary
-        os.makedirs(self.save_data_folder, exist_ok=True)
-        os.makedirs(self.extra_data_folder, exist_ok=True)
-        os.makedirs(self.fig_folder, exist_ok=True)
-        os.makedirs(self.weights_folder, exist_ok=True)
+        if not dryrun:
+            os.makedirs(self.save_data_folder, exist_ok=True)
+            # os.makedirs(self.extra_data_folder, exist_ok=True)
+            os.makedirs(self.fig_folder, exist_ok=True)
+            os.makedirs(self.weights_folder, exist_ok=True)
+            os.makedirs(self.tl_logdir, exist_ok=True)
         os.makedirs(self.log_folder, exist_ok=True)
-        os.makedirs(self.tl_logdir, exist_ok=True)
         # Hyperparameters
         self.hyper_dict              = hyper
         self.learning_rate           = self.hyper_dict["learning_rate"]
@@ -182,6 +188,14 @@ class WeatherRun:
         criterion = getattr(nn, self.loss)
         self.criterion = criterion()
         self.norm = getattr(nn, self.norm_strategy)
+        # Model
+        self.model = self.Net(
+                        learning_rate=self.learning_rate,
+                        loss=self.criterion,
+                        norm=self.norm,
+                        supervised=self.supervised,
+                        extra_logger=self.logger
+                    ).to(self.device)
 
     def log_global_setup (self):
         self.logger.info(f"GPU")
@@ -194,10 +208,21 @@ class WeatherRun:
         self.logger.info(f" net name           : {self.netname}")
         self.logger.info(f" log level          : {self.log_level_str}")
         self.logger.info("=====================")
+        self.logger.info(f"Paths")
+        self.logger.info("---------------------")
+        self.logger.info(f" work path          : {self.work_root_path}")
+        self.logger.info(f" global data path   : {self.save_data_folder}")
+        self.logger.info(f" run path           : {self.run_path}")
+        self.logger.info(f" weights path       : {self.weights_folder}")
+        # self.logger.info(f" extra data path    : {self.extra_data_folder}")
+        self.logger.info(f" log path           : {self.log_folder}")
+        self.logger.info(f" figure path        : {self.fig_folder}")
+        self.logger.info(f" tensorboard log    : {self.tl_logdir}")
+        self.logger.info("=====================")
         self.logger.info(f"Data")
         self.logger.info("---------------------")
-        self.logger.info(f" forecast variable  : {self.var_forecast}")
-        self.logger.info(f" analysis variable  : {self.var_analysis}")
+        self.logger.info(f" forecast variable  : {self.var_forecast}{self.suffix}")
+        self.logger.info(f" analysis variable  : {self.var_analysis}{self.suffix}")
         self.logger.info("=====================")
         self.logger.info(f"Hyperparameters")
         self.logger.info("---------------------")
@@ -206,7 +231,7 @@ class WeatherRun:
         self.logger.info(f" epochs             : {self.epochs}")
         self.logger.info(f" loss               : {self.loss}")
         self.logger.info(f" norm               : {self.norm_strategy}")
-        self.logger.info(f" lerning strategy   : {self.supervised_str}")
+        self.logger.info(f" learning strategy  : {self.supervised_str}")
         self.logger.info("=====================")
 
     def log_train_setup (self):
@@ -294,7 +319,8 @@ class WeatherRun:
             forecast_root_path = self.download_path
             analysis_root_path = forecast_root_path
             orig_freq = self.config["ecmwf"]["origin_frequency"]
-            grib_dict = {'dataType': en_datatype, 'cfVarName': self.var_forecast}
+            grib_dict_fc = {'dataType': en_datatype, 'cfVarName': self.var_forecast}
+            grib_dict_an = {'dataType': en_datatype, 'cfVarName': self.var_analysis}
         elif self.source == "cmcc":
             head_forecast_fn = "JLS"
             head_analysis_fn = "JLD"
@@ -302,7 +328,8 @@ class WeatherRun:
             # analysis_root_path = f"/data/inputs/METOCEAN/rolling/model/atmos/ECMWF/IFS_010/3.1analysis/{folder_acq_freq_analysis}/netcdf/"
             analysis_root_path = f"{self.config["cmcc"]["analysis_path"]}{self.config["cmcc"]["prod_freq_analysis"]}/{self.config["cmcc"]["file_format_analysis"]}/"
             orig_freq = self.config["cmcc"]["origin_frequency"]
-            grib_dict = {'cfVarName': self.var_forecast}
+            grib_dict_fc = {'cfVarName': self.var_forecast}
+            grib_dict_an = {'cfVarName': self.var_analysis}
         else:
             self.logger.error("Unsupported source type. Aborting...")
             return
@@ -311,6 +338,8 @@ class WeatherRun:
         date_range = pd.date_range(start=start_date, end=end_date, freq=orig_freq).to_pydatetime().tolist()
         self.logger.info(f"Get {self.var_forecast} (forecast), {self.var_analysis} (analysis) from {start_date.strftime(self.print_date_strformat)} to {end_date.strftime(self.print_date_strformat)}")
         var_d = {}
+        missed_samples = []
+        counter_samples = 0
         for d in date_range:
             forecast_d = d - datetime.timedelta(days=self.forecast_delta)
             self.logger.info(f"Analysis: {d}")
@@ -325,19 +354,22 @@ class WeatherRun:
                 forecast_fn_glob = f"{head_forecast_fn}{self.var_forecast}-{forecast_d.strftime(self.new_date_strformat)}-{d.strftime(self.new_date_strformat)}*"
             elif self.source == "cmcc":
                 # analysis_path = f"{analysis_root_path}{d.strftime(folder_date_strformat)}/"
-                analysis_path = f"{analysis_root_path}/{d.strftime("%Y")}/{d.strftime("%m")}/"
+                analysis_path = f"{analysis_root_path}{d.strftime("%Y")}/{d.strftime("%m")}/"
                 forecast_path = f"{forecast_root_path}{forecast_d.strftime(self.folder_date_strformat)}/"
-                analysis_fn_glob = f"{head_analysis_fn}{d.strftime(self.forecast_date_strformat)}{d.strftime(self.forecast_date_strformat)}*"
+                # No need of *01 here because the time format 0000 is already excluding the 00011 ending. This is by chance, keep an eye
+                analysis_fn_glob = f"{head_analysis_fn}{d.strftime(self.forecast_date_strformat)}{d.strftime(self.forecast_date_strformat)}*" 
                 # analysis_fn_glob = f"{d.strftime(folder_date_strformat)}-ECMWF---AM0100-MEDATL-b{d.strftime(folder_date_strformat)}_an{h.strftime("%M")}-fv11.00.nc"
                 forecast_fn_glob = f"{head_forecast_fn}{forecast_d.strftime(self.forecast_date_strformat)}{d.strftime(self.forecast_date_strformat)}*"
             
             # self.logger.debug(forecast_fn_glob)
             # self.logger.debug(analysis_fn_glob)
             errormsg = None
-            nearest_forecast_flag = False
+            nearest_minus1h_forecast_flag = False
+            nearest_plus1h_forecast_flag = False
             try:
                 forecast_fn = glob.glob(forecast_path + forecast_fn_glob)[0]
-            except:
+            except Exception as e:
+                self.logger.error(f"Exception: {e}")
                 errormsg = f"Couldn't find forecast file {forecast_path + forecast_fn_glob}"
                 if self.source == "cmcc":
                     # If exact +deltaforecast is not present attempt to estimate with nearest +-1h forecasts
@@ -348,67 +380,98 @@ class WeatherRun:
                     self.logger.info("Try nearest +-1h forecasts...")
                     try:
                         forecast_minus1h_fn = glob.glob(forecast_path + forecast_minus1h_fn_glob)[0]
-                        forecast_plus1h_fn = glob.glob(forecast_path + forecast_plus1h_fn_glob)[0]
-                        nearest_forecast_flag = True
-                    except:
+                        nearest_minus1h_forecast_flag = True
+                    except Exception as e:
                         self.logger.error(f"{errormsg}")
                         errormsg = f"Couldn't find forecast -1h file {forecast_path + forecast_minus1h_fn_glob}"
+                    try:
+                        forecast_plus1h_fn = glob.glob(forecast_path + forecast_plus1h_fn_glob)[0]
+                        nearest_plus1h_forecast_flag = True
+                    except Exception as e:
                         self.logger.error(f"{errormsg}")
                         errormsg = f"Couldn't find forecast +1h file {forecast_path + forecast_plus1h_fn_glob}"
                         self.logger.error(f"{errormsg}. Skipping...")
+                        missed_samples.append(d)
                         continue
                 # self.logger.error(f"{errormsg}. Skipping...")
-                continue
             try:
                 analysis_fn = glob.glob(analysis_path + analysis_fn_glob)[0]
-            except:
+            except Exception as e:
+                self.logger.error(f"Exception: {e}")
                 errormsg = f"Couldn't find analysis file {analysis_path + analysis_fn_glob}"
                 self.logger.error(f"{errormsg}. Skipping...")
+                missed_samples.append(d)
                 continue
+            # Get analysis dataset
             try:
                 self.logger.info(analysis_fn)
                 ds_analysis = xr.open_dataset(
                     analysis_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
-                    backend_kwargs={'filter_by_keys': grib_dict}
+                    backend_kwargs={'filter_by_keys': grib_dict_an}
                 )
+                an_values = ds_analysis.variables[self.var_analysis].values
                 # ds_analysis = nc.Dataset(analysis_fn)
-            except:
+            except Exception as e:
+                self.logger.error(f"Exception: {e}")
                 errormsg = f"Couldn't open analysis file {analysis_fn}"
                 self.logger.error(f"{errormsg}. Skipping...")
+                missed_samples.append(d)
                 continue
+            # Get forecast dataset
             try:
                 self.logger.info(forecast_fn)
-                if nearest_forecast_flag:
+                if nearest_minus1h_forecast_flag and nearest_plus1h_forecast_flag:
                     ds_forecast_minus1h = xr.open_dataset(
                         forecast_minus1h_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
-                        backend_kwargs={'filter_by_keys': grib_dict}
+                        backend_kwargs={'filter_by_keys': grib_dict_fc}
                     )
                     ds_forecast_plus1h = xr.open_dataset(
                         forecast_plus1h_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
-                        backend_kwargs={'filter_by_keys': grib_dict}
+                        backend_kwargs={'filter_by_keys': grib_dict_fc}
                     )
-                    fc_values = np.mean( np.array([ ds_forecast_plus1h.variables[var_forecast].values, ds_forecast_minus1h.variables[var_forecast].values ]), axis=0 )
+                    self.logger.warning("Average +-1h forecasts...")
+                    fc_values = np.mean( np.array([ ds_forecast_plus1h.variables[self.var_forecast].values, ds_forecast_minus1h.variables[self.var_forecast].values ]), axis=0 )
                 else:
-                    ds_forecast = xr.open_dataset(
-                        forecast_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
-                        backend_kwargs={'filter_by_keys': grib_dict}
-                    )
+                    if nearest_minus1h_forecast_flag:
+                        self.logger.warning("Use -1h forecast...")
+                        ds_forecast = xr.open_dataset(
+                            forecast_minus1h_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
+                            backend_kwargs={'filter_by_keys': grib_dict_fc}
+                        )
+                    elif nearest_plus1h_forecast_flag:
+                        self.logger.warning("Use +1h forecast...")
+                        ds_forecast = xr.open_dataset(
+                            forecast_plus1h_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
+                            backend_kwargs={'filter_by_keys': grib_dict_fc}
+                        )
+                    else:
+                        ds_forecast = xr.open_dataset(
+                            forecast_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
+                            backend_kwargs={'filter_by_keys': grib_dict_fc}
+                        )
                     fc_values = ds_forecast.variables[self.var_forecast].values
                 # ds_forecast = xr.open_dataset(forecast_fn, engine="cfgrib", indexpath="")
                 # ds_forecast = cfgrib.open_datasets(forecast_fn, indexpath="/tmp/tempgrib.{short_hash}.idx")
-            except:
+            except Exception as e:
+                self.logger.error(f"Exception: {e}")
                 errormsg = f"Couldn't open forecast file {forecast_fn}"
                 self.logger.error(f"{errormsg}. Skipping...")
+                missed_samples.append(d)
                 continue
-            try:
-                var_d[d] = {
-                    'forecast': fc_values,
-                    # 'analysis': ds_analysis.variables[self.var_analysis][:]
-                    'analysis': ds_analysis.variables[self.var_analysis].values
-                }
-            except:
-                self.logger.error(f"Data not available. Skipping...")
-        
+            self.logger.info(f"Forecast values shape: {fc_values.shape}")
+            self.logger.info(f"Analysis values shape: {an_values.shape}")
+            var_d[d] = {
+                'forecast': fc_values,
+                # 'analysis': ds_analysis.variables[self.var_analysis][:]
+                'analysis': an_values
+            }
+            counter_samples += 1
+
+        self.logger.info(f"Number of prepared samples: {counter_samples}")
+        self.logger.info(f"Number of missed samples: {len(missed_samples)}")
+        self.logger.debug(f"Missed samples: {missed_samples}")
+        var_d['samples'] = counter_samples
+        var_d['missed'] = missed_samples
         # Get coordinate data        
         if self.source == "ecmwf":
             analysis_fn_coords_glob = f"analysis-{self.var_analysis}-{coords_d.strftime(self.new_date_strformat)}-{coords_d.strftime(self.new_date_strformat)}*"
@@ -417,37 +480,54 @@ class WeatherRun:
             analysis_coords_path = analysis_path
         elif self.source == "cmcc":
             forecast_fn_coords_glob = f"{head_forecast_fn}{coords_d.strftime(self.forecast_date_strformat)}*"
-            analysis_fn_coords_glob = f"{head_analysis_fn}{coords_d.strftime(self.forecast_date_strformat)}*"
+            # Here we need to select the 00001 ending to avoid the 00011 which has got different variables. This is a workaround, not robust
+            analysis_fn_coords_glob = f"{head_analysis_fn}{coords_d.strftime(self.forecast_date_strformat)}*01"
             # analysis_fn_coords_glob = f"{coords_d.strftime(folder_date_strformat)}-ECMWF---AM0100-MEDATL-b{coords_d.strftime(folder_date_strformat)}_an00-fv11.00.nc"
             forecast_coords_path = f"{forecast_root_path}{coords_d.strftime(self.folder_date_strformat)}/"
-            analysis_coords_path = f"{analysis_root_path}/{coords_d.strftime("%Y")}/{coords_d.strftime("%m")}/"
+            analysis_coords_path = f"{analysis_root_path}{coords_d.strftime("%Y")}/{coords_d.strftime("%m")}/"
         forecast_coords_fn = glob.glob(forecast_coords_path + forecast_fn_coords_glob)[0]
         analysis_coords_fn = glob.glob(analysis_coords_path + analysis_fn_coords_glob)[0]
-        
-        if self.source == "ecmwf":
-            ds_forecast_coords = xr.open_dataset(
-                forecast_coords_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
-                backend_kwargs={'filter_by_keys': {'dataType': en_datatype, 'cfVarName': self.var_forecast}}
-            )
-            ds_analysis_coords = xr.open_dataset(
-                analysis_coords_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
-                backend_kwargs={'filter_by_keys': {'dataType': en_datatype, 'cfVarName': self.var_analysis}}
-            )
-        elif self.source == "cmcc":
-            ds_forecast_coords = xr.open_dataset(
-                forecast_coords_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
-                backend_kwargs={'filter_by_keys': {'cfVarName': self.var_forecast}}
-            )
-            ds_analysis_coords = xr.open_dataset(
-                analysis_coords_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
-                backend_kwargs={'filter_by_keys': {'cfVarName': self.var_analysis}}
-            )
 
-        lon_fc_full = ds_forecast_coords['longitude'].values
-        lat_fc_full = ds_forecast_coords['latitude'].values
+        ds_forecast_coords = xr.open_dataset(
+            forecast_coords_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
+            backend_kwargs={'filter_by_keys': grib_dict_fc}
+        )
+        ds_analysis_coords = xr.open_dataset(
+            analysis_coords_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
+            backend_kwargs={'filter_by_keys': grib_dict_an}
+        )
+
+        coord_lon_names = ['longitude', 'lon']
+        coord_lat_names = ['latitude', 'lat']
+        for lon_name in coord_lon_names:
+            try:
+                lon_fc_full = ds_forecast_coords[lon_name].values
+                break
+            except Exception as e:
+                self.logger.error(f"Exception: {e}")
+                self.logger.error(f"Longitude coord name {lon_name} not present in {forecast_coords_fn}")
+        for lon_name in coord_lon_names:
+            try:
+                lon_an_full = ds_analysis_coords[lon_name].values
+                break
+            except Exception as e:
+                self.logger.error(f"Exception: {e}")
+                self.logger.error(f"Longitude coord name {lon_name} not present in {analysis_coords_fn}")
+        for lat_name in coord_lat_names:
+            try:
+                lat_fc_full = ds_forecast_coords[lat_name].values
+                break
+            except Exception as e:
+                self.logger.error(f"Exception: {e}")
+                self.logger.error(f"Latitude coord name {lat_name} not present in {forecast_coords_fn}")
+        for lat_name in coord_lat_names:
+            try:
+                lat_an_full = ds_analysis_coords[lat_name].values
+                break
+            except Exception as e:
+                self.logger.error(f"Exception: {e}")
+                self.logger.error(f"Latitude coord name {lat_name} not present in {analysis_coords_fn}")
         lev_fc_full = ds_forecast_coords['isobaricInhPa'].values
-        lon_an_full = ds_analysis_coords['longitude'].values
-        lat_an_full = ds_analysis_coords['latitude'].values
         lev_an_full = ds_analysis_coords['isobaricInhPa'].values
 
         var_d['lon'] = {'analysis': lon_an_full}
@@ -467,14 +547,17 @@ class WeatherRun:
             average_d = np.load(f, allow_pickle=True)['arr_0'].item()
         return average_d
 
-    def load_data (self, model, type):
+    def load_data (self, type):
         data_fn = self._get_data_fn_from_type(type)
-        average_data_fn = self._get_average_fn(model)
-        trend_data_fn = self._get_trend_fn(model)
+        average_data_path = self._get_average_fn()
+        trend_data_path = self._get_trend_fn()
         self.logger.info(f"Loading {type} data from {data_fn}")
         with open(f"{data_fn}", 'rb') as f:
             var_d = np.load(f, allow_pickle=True)['arr_0'].item()
 
+        self.logger.info(f"Samples number: {var_d['samples']}")
+        self.logger.info(f"Missed samples number: {len(var_d['missed'])}")
+        self.logger.debug(f"Missed samples: {var_d['missed']}")
         lon_an_full = var_d['lon']['analysis']
         lat_an_full = var_d['lat']['analysis']
         lev_an_full = var_d['lev']['analysis']
@@ -482,10 +565,6 @@ class WeatherRun:
         lat_fc_full = var_d['lat']['forecast']
         lev_fc_full = var_d['lev']['forecast']
 
-        self.logger.debug(f"lon_an[0], lon_an[-1]: {lon_an_full[0]}, {lon_an_full[-1]}")
-        self.logger.debug(f"lon_fc[0], lon_fc[-1]: {lon_fc_full[0]}, {lon_fc_full[-1]}")
-        self.logger.debug(f"lat_an[0], lat_an[-1]: {lat_an_full[0]}, {lat_an_full[-1]}")
-        self.logger.debug(f"lat_fc[0], lat_fc[-1]: {lat_fc_full[0]}, {lat_fc_full[-1]}")
         lonfin = self.lonfin
         latfin = self.latfin
         lonini_fc_idx = (np.abs(lon_fc_full - self.lonini)).argmin()
@@ -513,19 +592,57 @@ class WeatherRun:
             lonfin_fc_idx = (np.abs(lon_fc_full - lonfin)).argmin()
             latfin_fc_idx = (np.abs(lat_fc_full - latfin)).argmin()
 
-        self.lonfc = lon_fc_full[lonini_fc_idx:lonfin_fc_idx]
-        self.latfc = lat_fc_full[latini_fc_idx:latfin_fc_idx]
-        self.lonan = lon_an_full[lonini_an_idx:lonfin_an_idx]
-        self.latan = lat_an_full[latini_an_idx:latfin_an_idx]
+        lonfc = lon_fc_full[lonini_fc_idx:lonfin_fc_idx]
+        latfc = lat_fc_full[latini_fc_idx:latfin_fc_idx]
+        lonan = lon_an_full[lonini_an_idx:lonfin_an_idx]
+        latan = lat_an_full[latini_an_idx:latfin_an_idx]
+        # self.logger.debug(f"Selected region")
+        # self.logger.debug(f"lonfc")
+        # self.logger.debug(f"{lonfc}")
+        # self.logger.debug(f"latfc")
+        # self.logger.debug(f"{latfc}")
+        # self.logger.debug(f"lonan")
+        # self.logger.debug(f"{lonan}")
+        # self.logger.debug(f"latan")
+        # self.logger.debug(f"{latan}")
 
-        self.logger.info(f"lat ini {self.latini}, lat fin {latfin} (forecast ds) = {latini_fc_idx}, {latfin_fc_idx}")
-        self.logger.info(f"lat ini {self.latini}, lat fin {latfin} (analysis ds) = {latini_an_idx}, {latfin_an_idx}")
-        self.logger.info(f"lon ini {self.lonini}, lon fin {lonfin} (forecast ds) = {lonini_fc_idx}, {lonfin_fc_idx}")
-        self.logger.info(f"lon ini {self.lonini}, lon fin {lonfin} (analysis ds) = {lonini_an_idx}, {lonfin_an_idx}")
-        self.logger.info(f"lev {self.levhpa} (analysis ds) = {lev_analysis}")
-        self.logger.info(f"lev {self.levhpa} (forecast ds) = {lev_forecast}")
-        self.logger.info(f"Full {self.var_forecast} shape: {var_d[next(iter(var_d))]['forecast'].shape}")
-        self.logger.info(f"Full {self.var_analysis} shape: {var_d[next(iter(var_d))]['analysis'].shape}")
+        self.logger.info("==================")
+        self.logger.info(f"Full dataset")
+        self.logger.info("==================")
+        self.logger.info(f"Forecast ({self.var_forecast})")
+        self.logger.info("------------------")
+        self.logger.info(f" shape {next(iter(var_d))}: {var_d[next(iter(var_d))]['forecast'].shape}")
+        self.logger.info(f" lat[0], lat[{lat_fc_full.shape[0]-1}]: {lat_fc_full[0]:.2f}, {lat_fc_full[-1]:.2f}")
+        self.logger.info(f" lon[0], lon[{lon_fc_full.shape[0]-1}]: {lon_fc_full[0]:.2f}, {lon_fc_full[-1]:.2f}")
+        self.logger.info(f" lev[0], lev[{lev_fc_full.shape[0]-1}]  : {lev_fc_full[0]:.2f}, {lev_fc_full[-1]:.2f}")
+        self.logger.info("==================")
+        self.logger.info(f"Analysis ({self.var_analysis})")
+        self.logger.info("------------------")
+        self.logger.info(f" shape {next(iter(var_d))}: {var_d[next(iter(var_d))]['analysis'].shape}")
+        self.logger.info(f" lat[0], lat[{lat_an_full.shape[0]-1}]: {lat_an_full[0]:.2f}, {lat_an_full[-1]:.2f}")
+        self.logger.info(f" lon[0], lon[{lon_an_full.shape[0]-1}]: {lon_an_full[0]:.2f}, {lon_an_full[-1]:.2f}")
+        self.logger.info(f" lev[0], lev[{lev_an_full.shape[0]-1}]  : {lev_an_full[0]:.2f}, {lev_an_full[-1]:.2f}")
+
+        self.logger.info("====================")
+        self.logger.info(f"Selected region")
+        self.logger.info("====================")
+        self.logger.info(f"Forecast ({self.var_forecast})")
+        self.logger.info("--------------------")
+        self.logger.info(f" shape var         : {var_d[next(iter(var_d))]['forecast'][lev_forecast,latini_fc_idx:latfin_fc_idx,lonini_fc_idx:lonfin_fc_idx].shape}")
+        self.logger.info(f" shape lat         : {latfc.shape}")
+        self.logger.info(f" shape lon         : {lonfc.shape}")
+        self.logger.info(f" lat[{latini_fc_idx}], lat[{latfin_fc_idx}]: {latfc[0]:.2f}, {latfc[-1]:.2f}")
+        self.logger.info(f" lon[{lonini_fc_idx}], lon[{lonfin_fc_idx}]: {lonfc[0]:.2f}, {lonfc[-1]:.2f}")
+        self.logger.info(f" lev[{lev_forecast}]            : {self.levhpa}")
+        self.logger.info("====================")
+        self.logger.info(f"Analysis ({self.var_analysis})")
+        self.logger.info("--------------------")
+        self.logger.info(f" shape var         : {var_d[next(iter(var_d))]['analysis'][lev_forecast,latini_an_idx:latfin_an_idx,lonini_an_idx:lonfin_an_idx].shape}")
+        self.logger.info(f" shape lat         : {latan.shape}")
+        self.logger.info(f" shape lon         : {lonan.shape}")
+        self.logger.info(f" lat[{latini_an_idx}], lat[{latfin_an_idx}]: {latan[0]:.2f}, {latan[-1]:.2f}")
+        self.logger.info(f" lon[{lonini_an_idx}], lon[{lonfin_an_idx}]: {lonan[0]:.2f}, {lonan[-1]:.2f}")
+        self.logger.info(f" lev[{lev_analysis}]            : {self.levhpa}")
 
         # Lists to hold all samples
         forecast_data = []
@@ -533,7 +650,7 @@ class WeatherRun:
 
         # Extract data from dictionary
         for key in var_d.keys():  # Loop through all timesteps
-            if key not in ['lon', 'lat', 'lev']:
+            if key not in self.non_sample_keys:
                 # Get 2D fields
                 forecast = var_d[key]["forecast"]  # Shape: (height, width)
                 analysis = var_d[key]["analysis"]  # Shape: (height, width)
@@ -571,7 +688,7 @@ class WeatherRun:
         self.logger.info(f"Average an-fc error: {errs.mean()}")
         self.logger.debug("Mean errors for each timestep:")
         self.logger.debug(mean_errs)
-        dates = np.array([x for x in list(var_d.keys()) if x not in ['lon', 'lat', 'lev']])
+        dates = np.array([x for x in list(var_d.keys()) if x not in self.non_sample_keys])
         if self.error_limit:
             condition = (mean_errs > self.error_limit).astype(bool) | (mean_errs < -self.error_limit).astype(bool)
             full_dates = dates.copy()
@@ -593,18 +710,23 @@ class WeatherRun:
             self.logger.debug(f"Pruned timepsteps where an-fc < -{self.error_limit}:")
             self.logger.debug(f"{dates[(pruned_mean_errs < -self.error_limit).astype(bool)]}")
 
-        average_data_path = f"{self.extra_data_folder}{average_data_fn}"
         if type == 'train':
-            self.logger.info(f"Save training period average in {average_data_fn}")
-            average_fc = X_np.mean(axis=0, keepdims=True)
-            average_an = y_np.mean(axis=0, keepdims=True)
-            # self.logger.debug(f"average_fc shape: {np.shape(average_fc)}")
-            average_d = {"forecast": average_fc, "analysis": average_an}
-            with open(average_data_path, 'wb') as f:
-                np.savez(average_data_path, average_d, allow_pickle=True)
+            if self._check_averages():
+                self.logger.info(f"Load training period average from {average_data_path}")
+                average_d = self.get_averages_from_fn(average_data_path)
+                average_fc = average_d["forecast"]
+                average_an = average_d["analysis"]
+            else:
+                self.logger.info(f"Save training period average in {average_data_path}")
+                average_fc = X_np.mean(axis=0, keepdims=True)
+                average_an = y_np.mean(axis=0, keepdims=True)
+                # self.logger.debug(f"average_fc shape: {np.shape(average_fc)}")
+                average_d = {"forecast": average_fc, "analysis": average_an}
+                with open(average_data_path, 'wb') as f:
+                    np.savez(average_data_path, average_d, allow_pickle=True)
         elif type == 'test':
-            # Load anomaly data
-            self.logger.info(f"Load training period average from {average_data_fn}")
+            # Load average data
+            self.logger.info(f"Load training period average from {average_data_path}")
             average_d = self.get_averages_from_fn(average_data_path)
             average_fc = average_d["forecast"]
             average_an = average_d["analysis"]
@@ -614,8 +736,8 @@ class WeatherRun:
 
         if self.detrend:
             # Load trend data
-            self.logger.info(f"Loading trend from {trend_data_fn}")
-            with open(f"{trend_data_fn}", 'rb') as f:
+            self.logger.info(f"Loading trend from {trend_data_path}")
+            with open(f"{trend_data_path}", 'rb') as f:
                 trend_d = np.load(f, allow_pickle=True)['arr_0'].item()
                 slopes_fc, intercepts_fc = trend_d['slopes']['forecast'], trend_d['intercepts']['forecast']
                 slopes_an, intercepts_an = trend_d['slopes']['analysis'], trend_d['intercepts']['analysis']
@@ -625,7 +747,8 @@ class WeatherRun:
             X_np -= np.expand_dims(trend_fc.reshape(X_np.shape[0], X_np.shape[-2], X_np.shape[-1]), axis=1)
             y_np -= np.expand_dims(trend_an.reshape(y_np.shape[0], y_np.shape[-2], y_np.shape[-1]), axis=1)
 
-        return X_np, y_np, dates
+        return X_np, y_np, dates, lonfc, latfc, lonan, latan
+
 
     def normalize (self, data):
         # Remove channel dimension (channel number C is always 1)
@@ -653,86 +776,80 @@ class WeatherRun:
         data = data.reshape(N, C, H, W)
         return data
 
-    def _get_final_products_base_fn (self, model):
-        return f"{model.__class__.__name__}_{self.supervised_str}_{self.var_forecast}-{self.var_analysis}-{self.levhpa}hPa_{self.lonini:+2.1f}-{self.latini:+2.1f}_{self.size_an}x{self.size_an}_{self.batch_size}bs-{self.learning_rate}lr-{self.epochs}epochs-{self.loss}_{self.norm_strategy}_{self.start_date.strftime(self.plot_date_strformat)}_{self.end_date.strftime(self.plot_date_strformat)}{self.suffix}"
+    def _get_final_products_base_fn (self):
+        return f"{self.model.__class__.__name__}_{self.supervised_str}_{self.var_forecast}-{self.var_analysis}-{self.levhpa}hPa_{self.lonini:+2.1f}-{self.latini:+2.1f}_{self.size_an}x{self.size_an}_{self.batch_size}bs-{self.learning_rate}lr-{self.epochs}epochs-{self.loss}_{self.norm_strategy}_{self.start_date.strftime(self.plot_date_strformat)}_{self.end_date.strftime(self.plot_date_strformat)}{self.suffix}"
 
-    def _get_average_fn (self, model):
-        return self._get_final_products_base_fn(model) + "_average" + self.data_extension
+    def _check_averages (self):
+        if Path(f"{self._get_average_fn()}").is_file():
+            self.logger.warning(f"Averages file {self._get_average_fn()} already exists.")
+            return True
+        else:
+            return False
 
-    def _get_trend_fn (self, model):
-        return self._get_final_products_base_fn(model) + "_trend" + self.data_extension
+    def _get_average_fn (self):
+        return self._get_train_data_fn() + "_average" + self.data_extension
 
-    def get_weights_fn (self, model):
-        return f"{self._get_final_products_base_fn(model)}.pth"
+    def _get_trend_fn (self):
+        return self._get_train_data_fn() + "_trend" + self.data_extension
 
-    def _get_pics_fn (self, model, date):
+    def _get_weights_fn (self):
+        return f"{self._get_final_products_base_fn()}.pth"
+
+    def _get_pics_fn (self, date):
         return f"{date.strftime(self.plot_date_strformat)}.png"
 
-    def save_weights (self, model):
-        weights_fn = self.get_weights_fn(model)
+    def _check_weights (self):
+        if Path(f"{self.weights_folder}{self._get_weights_fn()}").is_file():
+            self.logger.warning(f"Weights file {self._get_weights_fn()} already exists.")
+            return True
+        else:
+            return False
+
+    def save_weights (self):
+        weights_fn = self._get_weights_fn()
         self.logger.info(f"Save weights in file: {weights_fn}")
-        torch.save(model.state_dict(), f"{self.weights_folder}{weights_fn}")
+        torch.save(self.model.state_dict(), f"{self.weights_folder}{weights_fn}")
 
-    def train (self):
-        model = self.Net(
-            learning_rate=self.learning_rate,
-            loss=self.criterion,
-            norm=self.norm,
-            supervised=self.supervised,
-            extra_logger=self.logger
-        ).to(self.device)
-        num_workers = min(os.cpu_count(), 8)  # safe default
-        # Tensorboard
-        tl_logger = TensorBoardLogger(self.tl_logdir, name=self.run_base_name, version=self.run_number)
-        # Prepare data if necessary
-        self.prepare_data("train")
-        # Load data for training
-        X_np, y_np, _ = self.load_data(model, 'train')
-        # Normalize data (example: min-max scaling to [0, 1])
-        X_np, _ = self.normalize(X_np)
-        y_np, _ = self.normalize(y_np)
-        dataset = WeatherDataset(X_np, y_np)
-        # Split into train (90%) and test (10%)
-        num_samples = X_np.shape[0]
-        test_size = int(0.1 * num_samples)
-        train_size = num_samples - test_size
-        train_dataset, validation_dataset = random_split(dataset, [train_size, test_size])
-        # Create data loaders
-        train_dataloader = DataLoader(train_dataset, batch_size=self.batch_size, num_workers=num_workers)
-        validation_dataloader = DataLoader(validation_dataset, batch_size=self.batch_size, shuffle=False, num_workers=num_workers)
-        # DEBUG if crazy errors show up
-        # x, y = next(iter(train_dataloader))
-        # x, y = x.cuda(), y.cuda()  # if using CUDA
-        # out = model(x)
-        # loss = model.loss(out, y)
-        # try:
-        #     loss.backward()
-        # except Exception as e:
-        #     self.logger.info("Backward error:", e)
-        #     self.logger.info("Loss value:", loss)
-        #     self.logger.info("out stats:", out.min(), out.max(), out.mean())
-        #     self.logger.info("target stats:", y.min(), y.max(), y.mean())
-        #     raise
-        # Train
-        trainer = L.Trainer(max_epochs=self.epochs, log_every_n_steps=1, logger=tl_logger)
-        trainer.fit(model, train_dataloader, validation_dataloader)
-        # Save model weights
-        self.save_weights(model)
-        return model
+    def train (self, X_np, y_np):
+        if self._check_weights():
+            return
+        else:
+            num_workers = min(os.cpu_count(), 8)  # safe default
+            # Tensorboard
+            tl_logger = TensorBoardLogger(self.tl_logdir, name=self.run_base_name, version=self.run_number)
+            # Normalize data (example: min-max scaling to [0, 1])
+            X_np, _ = self.normalize(X_np)
+            y_np, _ = self.normalize(y_np)
+            dataset = WeatherDataset(X_np, y_np)
+            # Split into train (90%) and test (10%)
+            num_samples = X_np.shape[0]
+            test_size = int(0.1 * num_samples)
+            train_size = num_samples - test_size
+            train_dataset, validation_dataset = random_split(dataset, [train_size, test_size])
+            # Create data loaders
+            train_dataloader = DataLoader(train_dataset, batch_size=self.batch_size, num_workers=num_workers)
+            validation_dataloader = DataLoader(validation_dataset, batch_size=self.batch_size, shuffle=False, num_workers=num_workers)
+            # DEBUG if crazy errors show up
+            # x, y = next(iter(train_dataloader))
+            # x, y = x.cuda(), y.cuda()  # if using CUDA
+            # out = self.model(x)
+            # loss = self.model.loss(out, y)
+            # try:
+            #     loss.backward()
+            # except Exception as e:
+            #     self.logger.info("Backward error:", e)
+            #     self.logger.info("Loss value:", loss)
+            #     self.logger.info("out stats:", out.min(), out.max(), out.mean())
+            #     self.logger.info("target stats:", y.min(), y.max(), y.mean())
+            #     raise
+            # Train
+            trainer = L.Trainer(max_epochs=self.epochs, log_every_n_steps=1, logger=tl_logger)
+            trainer.fit(self.model, train_dataloader, validation_dataloader)
+            # Save model weights
+            self.save_weights()
 
-    def test (self):
-        model = self.Net(
-            learning_rate=self.learning_rate,
-            loss=self.criterion,
-            norm=self.norm,
-            supervised=self.supervised,
-            extra_logger=self.logger
-        ).to(self.device)
+    def test (self, X_np_test, y_np_test, date_range):
         num_workers = min(os.cpu_count(), 8)  # safe default
-        # Prepare data if necessary
-        self.prepare_data("test")
-        # Load data for testing
-        X_np_test, y_np_test, date_range = self.load_data(model, 'test')
         # Normalize data
         X_np_test, X_scaler = self.normalize(X_np_test)
         y_np_test, y_scaler = self.normalize(y_np_test)
@@ -740,12 +857,12 @@ class WeatherRun:
         # Create data loaders
         test_dataloader = DataLoader(test_dataset, batch_size=1, num_workers=num_workers, shuffle=False)
         # Load weights
-        self.logger.info(f"Load weights from file: {self.get_weights_fn(model)}")
-        model.load_state_dict(torch.load(f"{self.weights_folder}{self.get_weights_fn(model)}", map_location=self.device))
+        self.logger.info(f"Load weights from file: {self._get_weights_fn()}")
+        self.model.load_state_dict(torch.load(f"{self.weights_folder}{self._get_weights_fn()}", map_location=self.device))
         # Test
         trainer = L.Trainer(max_epochs=self.epochs, log_every_n_steps=1)
-        output_d = trainer.test(model, dataloaders=test_dataloader)
-        all_outputs = model.test_step_outputs
+        output_d = trainer.test(self.model, dataloaders=test_dataloader)
+        all_outputs = self.model.test_step_outputs
         self.logger.debug(f"Available keys in model output: {all_outputs[-1].keys()}")
         # Diffusion
         # all_outputs = torch.cat([r[0]["x0_recon"] for r in output_d], dim=0)
@@ -759,7 +876,7 @@ class WeatherRun:
         inputs = self.denormalize(np.array(inputs), X_scaler)
         targets = self.denormalize(np.array(targets), y_scaler)
         predictions = self.denormalize(np.array(outputs), X_scaler)
-        return model, inputs, targets, predictions
+        return inputs, targets, predictions
 
     def _is_port_in_use(self, port, host='0.0.0.0'):
         """Checks if the given port is already in use."""
@@ -811,7 +928,7 @@ class WeatherRun:
                 self.logger.error(f"An error occurred: {e}")
 
     def _create_cartopy_axis (
-        self, fig, rows, cols, n, title, var, vmin_plt, vmax_plt, vcenter_plt, cmap,
+        self, fig, rows, cols, n, title, var, lon, lat, vmin_plt, vmax_plt, vcenter_plt, cmap,
         borders=False
     ):
         ax = fig.add_subplot(
@@ -820,8 +937,15 @@ class WeatherRun:
         )
         ax.set_title(title)
         self.logger.debug(f"Ax ({rows}, {cols}, {n}) title: {title}")
+        self.logger.debug(f" lat[0], lat[{lat.shape[0]-1}]: {lat[0]}, {lat[lat.shape[0]-1]}")
+        self.logger.debug(f" lon[0], lon[{lon.shape[0]-1}]: {lon[0]}, {lon[lon.shape[0]-1]}")
+        # self.logger.debug(f"Plot region")
+        # self.logger.debug(f"lon")
+        # self.logger.debug(f"{lon}")
+        # self.logger.debug(f"lat")
+        # self.logger.debug(f"{lat}")
         self.logger.debug(f" vmin: {vmin_plt}, vmax: {vmax_plt}, vcenter: {vcenter_plt}")
-        im = ax.pcolormesh(self.lonan, self.latan,
+        im = ax.pcolormesh(lon, lat,
                            var,
                            norm=TwoSlopeNorm(vmin=vmin_plt, vmax=vmax_plt, vcenter=vcenter_plt), cmap=cmap,
                            transform=ccrs.PlateCarree()
@@ -855,9 +979,8 @@ class WeatherRun:
 
         return ax
 
-    def plot_figures (self, model, date, inputs, targets, outputs):
-        average_data_fn = self._get_average_fn(model)
-        average_data_path = f"{self.extra_data_folder}{average_data_fn}"
+    def plot_figures (self, date, inputs, targets, outputs, lonfc, latfc, lonan, latan):
+        average_data_path = self._get_average_fn()
         average_d = self.get_averages_from_fn(average_data_path)
         # Remove channel dimension
         average_fc = np.squeeze(average_d["forecast"], axis=1)
@@ -914,18 +1037,18 @@ class WeatherRun:
         title_details += f" at {self.levhpa} hPa (" + date.strftime(self.plot_date_strformat) + ")"
 
         # Forecast
-        ax1 = self._create_cartopy_axis (fig, 3, 2, 3, 'Forecast' + title_details, plot_sample_fc, vmin_plt, vmax_plt, vcenter_plt, cmap)
+        ax1 = self._create_cartopy_axis (fig, 3, 2, 3, 'Forecast' + title_details, plot_sample_fc, lonfc, latfc, vmin_plt, vmax_plt, vcenter_plt, cmap)
         # Analysis
-        ax2 = self._create_cartopy_axis (fig, 3, 2, 1, 'Analysis' + title_details, plot_sample_an, vmin_plt, vmax_plt, vcenter_plt, cmap)
+        ax2 = self._create_cartopy_axis (fig, 3, 2, 1, 'Analysis' + title_details, plot_sample_an, lonan, latan, vmin_plt, vmax_plt, vcenter_plt, cmap)
         # Prediction
-        ax3 = self._create_cartopy_axis (fig, 3, 2, 5, 'Prediction' + title_details, plot_pred, vmin_plt, vmax_plt, vcenter_plt, cmap)
+        ax3 = self._create_cartopy_axis (fig, 3, 2, 5, 'Prediction' + title_details, plot_pred, lonfc, latfc, vmin_plt, vmax_plt, vcenter_plt, cmap)
         # Average of analysis
         title_avg = f"Avg analysis {self.var_forecast} at {self.levhpa} hPa ({self.start_date.strftime(self.plot_date_strformat)} - {self.end_date.strftime(self.plot_date_strformat)})"
         if self.anomaly:
             vmin_plt = np.min(plot_average_an)
             vmax_plt = np.max(plot_average_an)
             vcenter_plt = vmin_plt+(vmax_plt-vmin_plt)/2
-        ax6 = self._create_cartopy_axis (fig, 3, 2, 2, title_avg, plot_average_an, vmin_plt, vmax_plt, vcenter_plt, self.cmap) # always complete field cmap 
+        ax6 = self._create_cartopy_axis (fig, 3, 2, 2, title_avg, plot_average_an, lonan, latan, vmin_plt, vmax_plt, vcenter_plt, self.cmap) # always complete field cmap
 
         # Error (Analysis - Forecast)
         error_fc = plot_sample_an - plot_sample_fc
@@ -948,7 +1071,7 @@ class WeatherRun:
             plot_err = error_pred
         else:
             self.logger.error(f"Unsupported dimensions {error_pred.shape} for error")
-        ax4 = self._create_cartopy_axis (fig, 3, 2, 6, 'Prediction Error' + title_details, plot_err, vmin_plt, vmax_plt, vcenter_plt, self.cmap_error)
+        ax4 = self._create_cartopy_axis (fig, 3, 2, 6, 'Prediction Error' + title_details, plot_err, lonan, latan, vmin_plt, vmax_plt, vcenter_plt, self.cmap_error)
 
         # Forecast error
         if len(error_fc.shape) == 3:
@@ -957,10 +1080,10 @@ class WeatherRun:
             plot_err = error_fc
         else:
             self.logger.error(f"Unsupported dimensions {error_fc.shape} for error")
-        ax5 = self._create_cartopy_axis (fig, 3, 2, 4, 'Forecast Error' + title_details, plot_err, vmin_plt, vmax_plt, vcenter_plt, self.cmap_error)
+        ax5 = self._create_cartopy_axis (fig, 3, 2, 4, 'Forecast Error' + title_details, plot_err, lonan, latan, vmin_plt, vmax_plt, vcenter_plt, self.cmap_error)
 
         plt.tight_layout()
-        plt.savefig(self.fig_folder + self._get_pics_fn(model, date))
+        plt.savefig(self.fig_folder + self._get_pics_fn(date))
         plt.close()
 
 
