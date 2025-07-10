@@ -120,7 +120,7 @@ class ResNetUNetDecoder(CustomLightningModule):
         return out
 
 
-class LitAutoEncoder(L.LightningModule):
+class WeatherResNetUNet(L.LightningModule):
     def __init__(self, loss, learning_rate, norm, supervised, extra_logger):
         super().__init__()
         self.extra_logger = extra_logger
@@ -155,7 +155,6 @@ class LitAutoEncoder(L.LightningModule):
             z1, z2, z3, z4 = self.encoder(x)
             x_hat = self.decoder(z1, z2, z3, z4)
             # self.extra_logger.debug(f"x_hat: {x_hat.shape}, x: {x.shape}, x_hat.device: {x_hat.device}, x.device: {x.device}")
-
             loss = self.loss(x_hat, x)
         # Logging to TensorBoard (if installed) by default
         self.log("train_loss", loss, prog_bar=True)
