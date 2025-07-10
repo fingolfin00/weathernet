@@ -102,7 +102,8 @@ class WeatherRun:
         self.run_base_name           = self.config["global"]["run_name"]
         self.run_number              = run
         self.run_name                = self.run_base_name + "_" + self.run_number
-        self.run_base_path           = self.config["global"]["run_root_path"] + self.run_base_name + "/"
+        self.run_root_path           = self.config["global"]["run_root_path"]
+        self.run_base_path           = self.run_root_path + self.run_base_name + "/"
         self.run_path                = self.run_base_path  + self.run_number + "/"
         self.work_root_path          = self.config["global"]["work_root_path"]
         self.netname                 = self.config["global"]["net"]
@@ -130,7 +131,8 @@ class WeatherRun:
         self.logger                  = logging.getLogger(__name__)
         self.log_folder              = self.run_path + "logs/"
         self.log_filename            = self.log_folder + self.run_name + ".log"
-        self.tl_logdir               = self.run_base_path + "lightning_logs"
+        self.tl_root_logdir          = self.run_root_path
+        self.tl_logdir               = f"{self.tl_root_logdir}{self.run_base_name}/lightning_logs/"
         # GPU
         self.device                  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # Data
@@ -785,7 +787,7 @@ class WeatherRun:
         port = "6007"
         command = [
             "tensorboard",
-            f"--logdir={self.tl_logdir}",
+            f"--logdir={self.tl_root_logdir}",
             f"--host={host}",
             f"--port={port}"
         ]
