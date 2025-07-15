@@ -924,8 +924,8 @@ class WeatherRun:
         # Test
         trainer = L.Trainer(max_epochs=self.epochs, log_every_n_steps=1)
         output_d = trainer.test(self.model, dataloaders=test_dataloader)
-        all_outputs = self.model.test_step_outputs
-        self.logger.debug(f"Available keys in model output: {all_outputs[-1].keys()}")
+        # all_outputs = self.model.test_step_outputs
+        # self.logger.debug(f"Available keys in model output: {all_outputs[-1].keys()}")
         # Diffusion
         # all_outputs = torch.cat([r[0]["x0_recon"] for r in output_d], dim=0)
         # outputs = all_outputs[-1]['x0_recon']
@@ -933,7 +933,7 @@ class WeatherRun:
         for idx, (input, target) in enumerate(test_dataloader): # input=forecast, target=analysis + x days
             inputs.append(input[0,:,:,:].cpu())
             targets.append(target[0,:,:,:].cpu())
-            outputs.append(all_outputs[idx]['preds'][0,:,:,:])
+            outputs.append(self.model.test_preds[idx,:,:,:])
         # Denormalize
         inputs = self.denormalize(np.array(inputs), X_scaler)
         targets = self.denormalize(np.array(targets), y_scaler)

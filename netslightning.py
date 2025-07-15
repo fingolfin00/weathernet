@@ -1,209 +1,266 @@
-import os, colorlog, logging
 import torch
-torch.set_float32_matmul_precision('medium')
-from torch import optim, nn, utils, Tensor
+import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.transforms import ToTensor
 import torchvision.models as models
-from torchmetrics.image import SpatialCorrelationCoefficient
 import lightning as L
+from torchmetrics.image import SpatialCorrelationCoefficient
 
-class CustomLightningModule (L.LightningModule):
-    def __init__ (self, extra_logger):
+class CustomLightningModule(L.LightningModule):
+    def __init__(self, extra_logger):
         super().__init__()
         self.extra_logger = extra_logger
 
-    def _squeeze_and_add_log_img (self, x, c, n, s, tl):
-        if not self.trainer.sanity_checking:
-            sq_x = torch.squeeze(x[n:n+1,c:c+1,:,:],0)
-            self.extra_logger.debug(f"{s} x, squeezed, channel {c}, sample {n}: {sq_x.shape}, x.device: {sq_x.device}")
+    def _squeeze_and_add_log_img(self, x, c, n, s, tl):
+        if not self.trainer.sanity_checking and self.global_step % 100 == 0:
+            sq_x = torch.squeeze(x[n:n+1, c:c+1, :, :], 0)
+            self.extra_logger.debug(f"{s} x, squeezed, channel {c}, sample {n}: {sq_x.shape}")
             tl.add_image(f"{s} c:{c}, n:{n}", sq_x, self.global_step)
 
-    def _print_debug (self, x, s):
-        self.extra_logger.debug(f"{s} x: {x.shape}, x.device: {x.device}")
-    
+    def _print_debug(self, x, s):
+        self.extra_logger.debug(f"{s} x: {x.shape}, device: {x.device}")
+
 class ResNetUNetEncoder(CustomLightningModule):
+    """
+    ResNet18-based encoder for UNet
+    Input: 256x256 -> Output features at multiple scales
+    """
     def __init__(self, norm, extra_logger):
         super().__init__(extra_logger=extra_logger)
-        # Load base ResNet18 model
-        # base_model = models.resnet18(weights=None)
+
+        # Load ResNet18 and modify for single channel input
         base_model = models.resnet18(norm_layer=norm)
 
-        # Replace first conv layer for single-channel input (grayscale)
-        self.encoder_conv1 = nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1, bias=False)
-        self.encoder_norm = base_model.bn1  # batch norm -> selected norm in weather.toml
-        
-        self.encoder_relu = base_model.relu
-        self.encoder_maxpool = base_model.maxpool  # downsample: 128 -> 64, or 256 -> 128
+        # Input processing (256x256 -> 128x128)
+        self.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        self.bn1 = base_model.bn1
+        self.relu = base_model.relu
+        self.maxpool = base_model.maxpool  # 128x128 -> 64x64
 
-        # Encoder layers from ResNet
-        self.encoder1 = base_model.layer1  # 64x64 -> 64x64
-        self.encoder2 = base_model.layer2  # 64x64 -> 32x32
-        self.encoder3 = base_model.layer3  # 32x32 -> 16x16
-        self.encoder4 = base_model.layer4  # 16x16 -> 8x8
-        
+        # Encoder blocks
+        self.layer1 = base_model.layer1  # 64x64 -> 64x64 (64 channels)
+        self.layer2 = base_model.layer2  # 64x64 -> 32x32 (128 channels)
+        self.layer3 = base_model.layer3  # 32x32 -> 16x16 (256 channels)
+        self.layer4 = base_model.layer4  # 16x16 -> 8x8 (512 channels)
+
+        # Channel dimensions for decoder
+        self.channels = [64, 128, 256, 512]
+
     def forward(self, x):
-        tensorboard_logger = self.logger.experiment
-        c, n = 0, 0 # selected channel and sample in batch for logging
-        # Initial conv
-        self._print_debug(x, "init")
-        x = self.encoder_conv1(x)
-        self._print_debug(x, "conv1")
-        x = self.encoder_norm(x)
-        self._print_debug(x, "norm")
-        x = self.encoder_relu(x)
-        x = self.encoder_maxpool(x)  # 128 → 64 or 256 -> 256
-        self._print_debug(x, "maxpool")
-        self._squeeze_and_add_log_img(x, c, n, "maxpool", tensorboard_logger)
+        """
+        Forward pass through encoder
+        Args:
+            x: Input tensor (B, 1, 256, 256)
+        Returns:
+            features: List of feature maps at different scales
+        """
+        # Initial processing
+        x = self.conv1(x)      # 256x256 -> 128x128
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)    # 128x128 -> 64x64
 
-        # Encoder
-        x1 = self.encoder1(x)   # 64x64
-        self._print_debug(x1, "encoder 1")
-        self._squeeze_and_add_log_img(x1, c, n, "encoder 1", tensorboard_logger)
-        x2 = self.encoder2(x1)  # 32x32
-        self._print_debug(x2, "encoder 2")
-        self._squeeze_and_add_log_img(x2, c, n, "encoder 2", tensorboard_logger)
-        x3 = self.encoder3(x2)  # 16x16
-        self._print_debug(x3, "encoder 3")
-        self._squeeze_and_add_log_img(x3, c, n, "encoder 3", tensorboard_logger)
-        x4 = self.encoder4(x3)  # 8x8
-        self._print_debug(x4, "encoder 4")
-        self._squeeze_and_add_log_img(x4, c, n, "encoder 4", tensorboard_logger)
+        # Encoder features (save for skip connections)
+        x1 = self.layer1(x)    # 64x64, 64 channels
+        x2 = self.layer2(x1)   # 32x32, 128 channels  
+        x3 = self.layer3(x2)   # 16x16, 256 channels
+        x4 = self.layer4(x3)   # 8x8, 512 channels
 
-        return x1, x2, x3, x4 
+        return [x1, x2, x3, x4]
 
-class ResNetUNetDecoder(CustomLightningModule):
-    def __init__(self, extra_logger):
-        super().__init__(extra_logger=extra_logger)
-        # self.debug = debug
-        # Decoder path
-        self.decoder4 = self._upsample_block(512, 256)                  # 8x8 or 16x16 -> up
-        self.decoder3 = self._upsample_block(256 + 256, 128)            # -> up
-        self.decoder2 = self._upsample_block(128 + 128, 64)             # -> up
-        self.decoder1 = self._upsample_block(64 + 64, 64)               # -> up
-        self.decoder0 = nn.Sequential(
-            nn.Conv2d(64, 32, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, 1, kernel_size=1)  # Output same shape as input
-        )
+class DecoderBlock(nn.Module):
+    """
+    Single decoder block with upsampling and skip connection
+    """
+    def __init__(self, in_channels, skip_channels, out_channels):
+        super().__init__()
 
-    def _upsample_block(self, in_channels, out_channels):
-        return nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+
+        # Convolution after concatenation
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels + skip_channels, out_channels, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
             nn.ReLU(inplace=True)
         )
 
-    def forward(self, x1, x2, x3, x4):
-        tensorboard_logger = self.logger.experiment
-        c, n = 0, 0 # selected channel and sample in batch for logging
-        d4 = self.decoder4(x4)
-        self._squeeze_and_add_log_img(d4, c, n, "decoder 4", tensorboard_logger)
-        d4 = F.interpolate(d4, size=x3.shape[-2:], mode='bilinear', align_corners=False)
-        d3 = self.decoder3(torch.cat([d4, x3], dim=1))
-        self._squeeze_and_add_log_img(d3, c, n, "decoder 3", tensorboard_logger)
+    def forward(self, x, skip):
+        """
+        Args:
+            x: Input from previous decoder layer
+            skip: Skip connection from encoder
+        """
+        # Upsample to match skip connection size
+        x = self.upsample(x)
+        # Concatenate with skip connection
+        if skip is not None:
+            x = torch.cat([x, skip], dim=1)
+        # Process through convolutions
+        x = self.conv(x)
+        return x
 
-        d3 = F.interpolate(d3, size=x2.shape[-2:], mode='bilinear', align_corners=False)
-        d2 = self.decoder2(torch.cat([d3, x2], dim=1))
-        self._squeeze_and_add_log_img(d2, c, n, "decoder 2", tensorboard_logger)
+class ResNetUNetDecoder(CustomLightningModule):
+    """
+    UNet decoder with explicit size handling
+    """
+    def __init__(self, extra_logger):
+        super().__init__(extra_logger=extra_logger)
 
-        d2 = F.interpolate(d2, size=x1.shape[-2:], mode='bilinear', align_corners=False)
-        d1 = self.decoder1(torch.cat([d2, x1], dim=1))
-        self._squeeze_and_add_log_img(d1, c, n, "decoder 1", tensorboard_logger)
+        # Decoder blocks (explicit channel management)
+        self.decoder4 = DecoderBlock(512, 256, 256)  # 8x8 -> 16x16
+        self.decoder3 = DecoderBlock(256, 128, 128)  # 16x16 -> 32x32
+        self.decoder2 = DecoderBlock(128, 64, 64)    # 32x32 -> 64x64
+        self.decoder1 = DecoderBlock(64, 0, 64)      # 64x64 -> 128x128 (no skip)
 
-        # Final layer to restore original resolution
-        # out = F.interpolate(d1, scale_factor=2, mode='bilinear', align_corners=False)
-        out = self.decoder0(d1)
-        self._squeeze_and_add_log_img(out, c, n, "out", tensorboard_logger)
-        return out
+        # Final output layer
+        self.final_upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        self.final_conv = nn.Sequential(
+            nn.Conv2d(64, 32, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 1, kernel_size=1)
+        )
 
+    def forward(self, encoder_features):
+        """
+        Args:
+            encoder_features: List [x1, x2, x3, x4] from encoder
+        Returns:
+            output: Final prediction (B, 1, 256, 256)
+        """
+        x1, x2, x3, x4 = encoder_features
+
+        # Decoder path with skip connections
+        d4 = self.decoder4(x4, x3)  # 8x8 -> 16x16
+        d3 = self.decoder3(d4, x2)  # 16x16 -> 32x32
+        d2 = self.decoder2(d3, x1)  # 32x32 -> 64x64
+        d1 = self.decoder1(d2, None)  # 64x64 -> 128x128 (no skip)
+
+        # Final upsampling to original resolution
+        d1 = self.final_upsample(d1)  # 128x128 -> 256x256
+        output = self.final_conv(d1)  # 256x256 -> 256x256 (1 channel)
+
+        return output
 
 class WeatherResNetUNet(L.LightningModule):
+    """
+    Complete UNet model with clean architecture
+    """
     def __init__(self, loss, learning_rate, norm, supervised, extra_logger):
         super().__init__()
         self.extra_logger = extra_logger
-        self.encoder = ResNetUNetEncoder(norm=norm, extra_logger=self.extra_logger)
-        self.decoder = ResNetUNetDecoder(extra_logger=self.extra_logger)
         self.loss = loss
-        self.norm = norm
         self.learning_rate = learning_rate
         self.supervised = supervised
+
+        # Components
+        self.encoder = ResNetUNetEncoder(norm=norm, extra_logger=extra_logger)
+        self.decoder = ResNetUNetDecoder(extra_logger=extra_logger)
+
+        # Metrics
+        self.scc = SpatialCorrelationCoefficient()
+
+        # Metrics storage
         self.test_step_outputs = []
-        self.extra_logger.info(f"Trainable parameters: {sum(p.numel() for p in self.parameters() if p.requires_grad)}")
+        self.val_step_outputs = []
+
+        # Log model info
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        self.extra_logger.info(f"Trainable parameters: {trainable_params:,}")
 
     def forward(self, x):
-        x1, x2, x3, x4 = self.encoder(x)
-        output = self.decoder(x1, x2, x3, x4)
-        self.extra_logger.debug(f"out.max: {output.max()}, in.max: {x.max()}, out.min: {output.min()}, in.min: {x.min()}")
+        """
+        Forward pass through complete UNet
+        Args:
+            x: Input tensor (B, 1, 256, 256)
+        Returns:
+            output: Prediction (B, 1, 256, 256)
+        """
+        encoder_features = self.encoder(x)
+        output = self.decoder(encoder_features)
         return output
 
     def training_step(self, batch, batch_idx):
         if self.supervised:
-            # Supervised
             x, y = batch
-            # x = x.view(x.size(0), -1)
-            z1, z2, z3, z4 = self.encoder(x)
-            x_hat = self.decoder(z1, z2, z3, z4)
-            # self.extra_logger.debug(f"x_hat: {x_hat.shape}, x: {x.shape}, x_hat.device: {x_hat.device}, x.device: {x.device}")
-            loss = self.loss(x_hat, y)
+            pred = self(x)
+            loss = self.loss(pred, y)
         else:
-            # Unsupervised
             x, _ = batch
-            # x = x.view(x.size(0), -1)
-            z1, z2, z3, z4 = self.encoder(x)
-            x_hat = self.decoder(z1, z2, z3, z4)
-            # self.extra_logger.debug(f"x_hat: {x_hat.shape}, x: {x.shape}, x_hat.device: {x_hat.device}, x.device: {x.device}")
-            loss = self.loss(x_hat, x)
-        # Logging to TensorBoard (if installed) by default
+            pred = self(x)
+            loss = self.loss(pred, x)
+
         self.log("train_loss", loss, prog_bar=True)
         return loss
 
-    def _val_step (self, batch, batch_idx, loss_name):
-        x, y = batch
-        preds = self(x)
-        loss = self.loss(preds, y)
-        scc = SpatialCorrelationCoefficient().to(x.device)
-        MAE = F.l1_loss(preds, y, reduction='mean').item()
-        RMSE = F.mse_loss(preds, y, reduction='mean').item()
-        SCC = scc(preds, y)
-        out = {
-            loss_name: loss.detach(),
-            "preds": preds.detach().cpu(),
-            "MAE": MAE,
-            "RMSE": RMSE,
-            "SCC": SCC
-        }
-        self.test_step_outputs.append(out)
-        self.log(loss_name, loss, prog_bar=True)
-        # self.log("preds", preds, prog_bar=True)
-        self.log("MAE", MAE, prog_bar=True)
-        self.log("RMSE", RMSE, prog_bar=True)
-        self.log("SCC", SCC, prog_bar=True)
-        return out
-        
     def validation_step(self, batch, batch_idx):
-        return self._val_step(batch, batch_idx, "val_loss")
+        return self._shared_eval_step(batch, batch_idx, "val_loss", self.val_step_outputs)
 
     def test_step(self, batch, batch_idx):
-        return self._val_step(batch, batch_idx, "test_loss")
-    
-    def configure_optimizers(self):
-        optimizer = optim.Adam(self.parameters(), lr=self.learning_rate)
-        return optimizer
+        return self._shared_eval_step(batch, batch_idx, "test_loss", self.test_step_outputs)
+
+    def _shared_eval_step(self, batch, batch_idx, loss_name, outputs_list):
+        """Shared logic for validation and test steps"""
+        x, y = batch
+        pred = self(x)
+        loss = self.loss(pred, y)
+
+        # Calculate metrics
+        mae = F.l1_loss(pred, y, reduction='mean')
+        rmse = torch.sqrt(F.mse_loss(pred, y, reduction='mean'))
+        scc = self.scc(pred, y)
+
+        # Store results
+        result = {
+            loss_name: loss.detach(),
+            "preds": pred.detach().cpu(),
+            "targets": y.detach().cpu(),
+            "mae": mae.item(),
+            "rmse": rmse.item(),
+            "scc": scc.item()
+        }
+        outputs_list.append(result)
+
+        # Log metrics
+        self.log(loss_name, loss, prog_bar=True)
+        self.log("mae", mae, prog_bar=True)
+        self.log("rmse", rmse, prog_bar=True)
+        self.log("scc", scc, prog_bar=True)
+
+        return result
+
+    def on_validation_epoch_end(self):
+        """Process validation results"""
+        if self.val_step_outputs:
+            avg_mae = sum(out["mae"] for out in self.val_step_outputs) / len(self.val_step_outputs)
+            avg_rmse = sum(out["rmse"] for out in self.val_step_outputs) / len(self.val_step_outputs)
+            avg_scc = sum(out["scc"] for out in self.val_step_outputs) / len(self.val_step_outputs)
+
+            self.log("val_mae_epoch", avg_mae)
+            self.log("val_rmse_epoch", avg_rmse)
+            self.log("val_scc_epoch", avg_scc)
+
+            self.val_step_outputs.clear()
 
     def on_test_epoch_end(self):
-        # all_preds = torch.stack(self.test_step_outputs)
-        preds = [out["preds"] for out in self.test_step_outputs]
-        MAE = [out["MAE"] for out in self.test_step_outputs]
-        RMSE = [out["RMSE"] for out in self.test_step_outputs]
-        SCC = [out["SCC"] for out in self.test_step_outputs]
-        # store for external access
-        self.test_preds = torch.cat(preds, dim=0)
-        self.test_MAE = MAE
-        self.test_RMSE = RMSE
-        self.test_SCC = SCC
-        self.extra_logger.info(f"MAE: {MAE}")
-        self.extra_logger.info(f"RMSE: {RMSE}")
-        self.extra_logger.info(f"SCC: {SCC}")
+        """Process test results and store for external access"""
+        if self.test_step_outputs:
+            # Store predictions and targets
+            self.test_preds = torch.cat([out["preds"] for out in self.test_step_outputs], dim=0)
+            self.test_targets = torch.cat([out["targets"] for out in self.test_step_outputs], dim=0)
+
+            # Calculate and store metrics
+            self.test_mae = [out["mae"] for out in self.test_step_outputs]
+            self.test_rmse = [out["rmse"] for out in self.test_step_outputs]
+            self.test_scc = [out["scc"] for out in self.test_step_outputs]
+
+            # Log summary
+            avg_mae = sum(self.test_mae) / len(self.test_mae)
+            avg_rmse = sum(self.test_rmse) / len(self.test_rmse)
+            avg_scc = sum(self.test_scc) / len(self.test_scc)
+
+            self.extra_logger.info(f"Test Results - MAE: {avg_mae:.4f}, RMSE: {avg_rmse:.4f}, SCC: {avg_scc:.4f}")
+
+            self.test_step_outputs.clear()
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), lr=self.learning_rate)
