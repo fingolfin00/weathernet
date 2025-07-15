@@ -31,6 +31,7 @@ from sklearn.preprocessing import (
     minmax_scale,
 )
 from itertools import product
+from statsmodels.tsa.seasonal import seasonal_decompose
 
 matplotlib.use('Agg')  # Use a non-interactive backend
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -148,6 +149,7 @@ class WeatherRun:
         self.lonini, self.lonfin     = self.config["data"]["lonini"], self.config["data"]["lonfin"]
         self.latini, self.latfin     = self.config["data"]["latini"], self.config["data"]["latfin"]
         self.anomaly                 = self.config["data"]["anomaly"]
+        self.deseason                = self.config["data"]["deseason"]
         self.detrend                 = self.config["data"]["detrend"]
         self.size_an                 = self.config["data"]["domain_size"] # set a square domain starting from lonini and latini, lonfin and latfin are ignored
         self.source                  = self.config["data"]["source"]
@@ -168,6 +170,7 @@ class WeatherRun:
         # Suffices for file names
         self.suffix = "_anomaly" if self.anomaly else ""
         self.suffix += "_detrend" if self.detrend else ""
+        self.suffix += "_deseason" if self.deseason else ""
         # Make folders if necessary
         if not dryrun:
             os.makedirs(self.save_data_folder, exist_ok=True)
@@ -542,15 +545,16 @@ class WeatherRun:
         with open(f"{data_fn}", 'wb') as f:
             np.savez(f"{data_fn}", var_d, allow_pickle=True)
 
-    def get_averages_from_fn (self, average_data_fn):
-        with open(f"{average_data_fn}", 'rb') as f:
-            average_d = np.load(f, allow_pickle=True)['arr_0'].item()
-        return average_d
+    def get_data_from_fn (self, data_fn):
+        with open(f"{data_fn}", 'rb') as f:
+            data_d = np.load(f, allow_pickle=True)['arr_0'].item()
+        return data_d
 
     def load_data (self, type):
         data_fn = self._get_data_fn_from_type(type)
         average_data_path = self._get_average_fn()
         trend_data_path = self._get_trend_fn()
+        season_data_path = self._get_season_fn()
         self.logger.info(f"Loading {type} data from {data_fn}")
         with open(f"{data_fn}", 'rb') as f:
             var_d = np.load(f, allow_pickle=True)['arr_0'].item()
@@ -710,27 +714,56 @@ class WeatherRun:
             self.logger.debug(f"Pruned timepsteps where an-fc < -{self.error_limit}:")
             self.logger.debug(f"{dates[(pruned_mean_errs < -self.error_limit).astype(bool)]}")
 
-        if type == 'train':
-            if self._check_averages():
+        if self.deseason:
+            self.logger.info(f"Deseasonalize...")
+            # decomposition_fc = seasonal_decompose(X_np, model='additive', period=12)
+            # decomposition_an = seasonal_decompose(y_np, model='additive', period=12)
+            if type == 'train':
+                if self._check_seasons():
+                    self.logger.info(f"Load training period seasonality from {season_data_path}")
+                    season_d = self.get_data_from_fn(season_data_path)
+                    season_fc = season_d["forecast"]
+                    season_an = season_d["analysis"]
+                    X_np, _ = self.deseasonalize(X_np, self.start_date, self.end_date, var_d['missed'], climatology_monthly=season_fc)
+                    y_np, _ = self.deseasonalize(y_np, self.start_date, self.end_date, var_d['missed'], climatology_monthly=season_an)
+                else:
+                    self.logger.info(f"Save training period seasonality in {season_data_path}")
+                    X_np, season_fc = self.deseasonalize(X_np, self.start_date, self.end_date, var_d['missed'])
+                    y_np, season_an = self.deseasonalize(y_np, self.start_date, self.end_date, var_d['missed'])
+                    # self.logger.debug(f"average_fc shape: {np.shape(average_fc)}")
+                    season_d = {"forecast": season_fc, "analysis": season_an}
+                    with open(season_data_path, 'wb') as f:
+                        np.savez(season_data_path, season_d, allow_pickle=True)
+            elif type == 'test':
+                # Load average data
+                self.logger.info(f"Load training period seasonality from {season_data_path}")
+                season_d = self.get_data_from_fn(season_data_path)
+                season_fc = season_d["forecast"]
+                season_an = season_d["analysis"]
+                X_np, _ = self.deseasonalize(X_np, self.test_start_date, self.test_end_date, var_d['missed'], climatology_monthly=season_fc)
+                y_np, _ = self.deseasonalize(y_np, self.test_start_date, self.test_end_date, var_d['missed'], climatology_monthly=season_an)
+
+        if self.anomaly:
+            if type == 'train':
+                if self._check_averages():
+                    self.logger.info(f"Load training period average from {average_data_path}")
+                    average_d = self.get_data_from_fn(average_data_path)
+                    average_fc = average_d["forecast"]
+                    average_an = average_d["analysis"]
+                else:
+                    self.logger.info(f"Save training period average in {average_data_path}")
+                    average_fc = X_np.mean(axis=0, keepdims=True)
+                    average_an = y_np.mean(axis=0, keepdims=True)
+                    # self.logger.debug(f"average_fc shape: {np.shape(average_fc)}")
+                    average_d = {"forecast": average_fc, "analysis": average_an}
+                    with open(average_data_path, 'wb') as f:
+                        np.savez(average_data_path, average_d, allow_pickle=True)
+            elif type == 'test':
+                # Load average data
                 self.logger.info(f"Load training period average from {average_data_path}")
-                average_d = self.get_averages_from_fn(average_data_path)
+                average_d = self.get_data_from_fn(average_data_path)
                 average_fc = average_d["forecast"]
                 average_an = average_d["analysis"]
-            else:
-                self.logger.info(f"Save training period average in {average_data_path}")
-                average_fc = X_np.mean(axis=0, keepdims=True)
-                average_an = y_np.mean(axis=0, keepdims=True)
-                # self.logger.debug(f"average_fc shape: {np.shape(average_fc)}")
-                average_d = {"forecast": average_fc, "analysis": average_an}
-                with open(average_data_path, 'wb') as f:
-                    np.savez(average_data_path, average_d, allow_pickle=True)
-        elif type == 'test':
-            # Load average data
-            self.logger.info(f"Load training period average from {average_data_path}")
-            average_d = self.get_averages_from_fn(average_data_path)
-            average_fc = average_d["forecast"]
-            average_an = average_d["analysis"]
-        if self.anomaly:
             X_np -= average_fc
             y_np -= average_an
 
@@ -749,6 +782,25 @@ class WeatherRun:
 
         return X_np, y_np, dates, lonfc, latfc, lonan, latan
 
+    def deseasonalize (self, data, start_date, end_date, missing_dates, climatology_monthly=None):
+        N, C, H, W = np.shape(data)
+        data = np.squeeze(data, axis=1)
+        # self.logger.info(len(missing_dates))
+        date_range = pd.date_range(start=start_date, end=end_date, freq=self.config[self.source]["origin_frequency"]).difference(missing_dates)
+        da = xr.DataArray(
+            data,
+            dims=['time', 'lat', 'lon'],
+            coords={
+                'time': date_range,
+                'lat': range(H),
+                'lon': range(W)
+            }
+        )
+        if not isinstance(climatology_monthly, np.ndarray):
+            climatology_monthly = da.groupby('time.month').mean('time')
+            self.logger.debug(f"Monthly climatology shape: {climatology_monthly.shape}")
+        deseasonalized_monthly = da.groupby('time.month') - climatology_monthly
+        return deseasonalized_monthly.values.reshape(N, C, H, W), climatology_monthly
 
     def normalize (self, data):
         # Remove channel dimension (channel number C is always 1)
@@ -785,6 +837,16 @@ class WeatherRun:
             return True
         else:
             return False
+
+    def _check_seasons (self):
+        if Path(f"{self._get_season_fn()}").is_file():
+            self.logger.warning(f"Seasonality file {self._get_season_fn()} already exists.")
+            return True
+        else:
+            return False
+
+    def _get_season_fn (self):
+        return self._get_train_data_fn() + "_season" + self.data_extension
 
     def _get_average_fn (self):
         return self._get_train_data_fn() + "_average" + self.data_extension
@@ -981,7 +1043,7 @@ class WeatherRun:
 
     def plot_figures (self, date, inputs, targets, outputs, lonfc, latfc, lonan, latan):
         average_data_path = self._get_average_fn()
-        average_d = self.get_averages_from_fn(average_data_path)
+        average_d = self.get_data_from_fn(average_data_path)
         # Remove channel dimension
         average_fc = np.squeeze(average_d["forecast"], axis=1)
         average_an = np.squeeze(average_d["analysis"], axis=1)
@@ -1034,6 +1096,7 @@ class WeatherRun:
             vcenter_plt = vmin_plt+(vmax_plt-vmin_plt)/2
             cmap = self.cmap
         title_details = f" {self.var_forecast}a" if self.anomaly else f" {self.var_forecast}"
+        title_details += " (deseasonalized)" if self.deseason else ""
         title_details += f" at {self.levhpa} hPa (" + date.strftime(self.plot_date_strformat) + ")"
 
         # Forecast

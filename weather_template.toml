@@ -27,7 +27,8 @@
     # latfin                  = 25.5
     domain_size             = 256 # if set lonfin snd latfin are ignored
     detrend                 = false
-    anomaly                 = true
+    deseason                = true
+    anomaly                 = false
     # source                  = "cmcc"
     source                  = "ecmwf"
     # acquisition_frequency   = "6h"
