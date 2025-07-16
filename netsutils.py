@@ -953,6 +953,8 @@ class WeatherRun:
 
     def test (self, X_np_test, y_np_test, date_range):
         num_workers = min(os.cpu_count(), 8)  # safe default
+        # Tensorboard
+        tl_logger = TensorBoardLogger(self.tl_logdir, name=self.run_base_name, version=f"test_{self.run_number}")
         # Normalize data
         X_np_test, X_scaler = self.normalize(X_np_test)
         y_np_test, y_scaler = self.normalize(y_np_test)
