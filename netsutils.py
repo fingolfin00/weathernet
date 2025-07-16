@@ -18,6 +18,7 @@ import urllib.request, ssl, certifi
 import lightning as L
 from lightning.pytorch.loggers import TensorBoardLogger
 # from nets import WeatherCNN, MiniResNet18, ResNetUNet, UNetConvLSTM, SpatioTemporalForecastDataset
+from smaatunet import SmaAt_UNet
 from netslightning import WeatherResNetUNet
 from diffusion import DiffusionUNet, DiffusionNoiseScheduler, LitDiffusion
 from sklearn.preprocessing import (
