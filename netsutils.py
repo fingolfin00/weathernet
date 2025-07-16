@@ -604,6 +604,12 @@ class WeatherRun:
         latfc = lat_fc_full[latini_fc_idx:latfin_fc_idx]
         lonan = lon_an_full[lonini_an_idx:lonfin_an_idx]
         latan = lat_an_full[latini_an_idx:latfin_an_idx]
+
+        first_step = next(iter(var_d))
+        first_fc = var_d[first_step]['forecast']
+        first_an = var_d[first_step]['analysis']
+        first_fc_sel = first_fc[lev_forecast,latini_fc_idx:latfin_fc_idx,lonini_fc_idx:lonfin_fc_idx]
+        first_an_sel = first_an[lev_forecast,latini_fc_idx:latfin_fc_idx,lonini_fc_idx:lonfin_fc_idx]
         # self.logger.debug(f"Selected region")
         # self.logger.debug(f"lonfc")
         # self.logger.debug(f"{lonfc}")
@@ -619,14 +625,14 @@ class WeatherRun:
         self.logger.info("==================")
         self.logger.info(f"Forecast ({self.var_forecast})")
         self.logger.info("------------------")
-        self.logger.info(f" shape {next(iter(var_d))}: {var_d[next(iter(var_d))]['forecast'].shape}")
+        self.logger.info(f" shape {first_step}: {first_fc.shape}")
         self.logger.info(f" lat[0], lat[{lat_fc_full.shape[0]-1}]: {lat_fc_full[0]:.2f}, {lat_fc_full[-1]:.2f}")
         self.logger.info(f" lon[0], lon[{lon_fc_full.shape[0]-1}]: {lon_fc_full[0]:.2f}, {lon_fc_full[-1]:.2f}")
         self.logger.info(f" lev[0], lev[{lev_fc_full.shape[0]-1}]  : {lev_fc_full[0]:.2f}, {lev_fc_full[-1]:.2f}")
         self.logger.info("==================")
         self.logger.info(f"Analysis ({self.var_analysis})")
         self.logger.info("------------------")
-        self.logger.info(f" shape {next(iter(var_d))}: {var_d[next(iter(var_d))]['analysis'].shape}")
+        self.logger.info(f" shape {first_step}: {first_an.shape}")
         self.logger.info(f" lat[0], lat[{lat_an_full.shape[0]-1}]: {lat_an_full[0]:.2f}, {lat_an_full[-1]:.2f}")
         self.logger.info(f" lon[0], lon[{lon_an_full.shape[0]-1}]: {lon_an_full[0]:.2f}, {lon_an_full[-1]:.2f}")
         self.logger.info(f" lev[0], lev[{lev_an_full.shape[0]-1}]  : {lev_an_full[0]:.2f}, {lev_an_full[-1]:.2f}")
@@ -636,18 +642,20 @@ class WeatherRun:
         self.logger.info("====================")
         self.logger.info(f"Forecast ({self.var_forecast})")
         self.logger.info("--------------------")
-        self.logger.info(f" shape var         : {var_d[next(iter(var_d))]['forecast'][lev_forecast,latini_fc_idx:latfin_fc_idx,lonini_fc_idx:lonfin_fc_idx].shape}")
+        self.logger.info(f" shape var         : {first_fc_sel.shape}")
         self.logger.info(f" shape lat         : {latfc.shape}")
         self.logger.info(f" shape lon         : {lonfc.shape}")
+        self.logger.info(f" shape lev         : {lev_fc_full.shape}")
         self.logger.info(f" lat[{latini_fc_idx}], lat[{latfin_fc_idx}]: {latfc[0]:.2f}, {latfc[-1]:.2f}")
         self.logger.info(f" lon[{lonini_fc_idx}], lon[{lonfin_fc_idx}]: {lonfc[0]:.2f}, {lonfc[-1]:.2f}")
         self.logger.info(f" lev[{lev_forecast}]            : {self.levhpa}")
         self.logger.info("====================")
         self.logger.info(f"Analysis ({self.var_analysis})")
         self.logger.info("--------------------")
-        self.logger.info(f" shape var         : {var_d[next(iter(var_d))]['analysis'][lev_forecast,latini_an_idx:latfin_an_idx,lonini_an_idx:lonfin_an_idx].shape}")
+        self.logger.info(f" shape var         : {first_an_sel.shape}")
         self.logger.info(f" shape lat         : {latan.shape}")
         self.logger.info(f" shape lon         : {lonan.shape}")
+        self.logger.info(f" shape lev         : {lev_an_full.shape}")
         self.logger.info(f" lat[{latini_an_idx}], lat[{latfin_an_idx}]: {latan[0]:.2f}, {latan[-1]:.2f}")
         self.logger.info(f" lon[{lonini_an_idx}], lon[{lonfin_an_idx}]: {lonan[0]:.2f}, {lonan[-1]:.2f}")
         self.logger.info(f" lev[{lev_analysis}]            : {self.levhpa}")
@@ -660,8 +668,27 @@ class WeatherRun:
         for key in var_d.keys():  # Loop through all timesteps
             if key not in self.non_sample_keys:
                 # Get 2D fields
-                forecast = var_d[key]["forecast"]  # Shape: (height, width)
-                analysis = var_d[key]["analysis"]  # Shape: (height, width)
+                forecast = var_d[key]["forecast"]  # Shape: (level, lat, lon)
+                analysis = var_d[key]["analysis"]  # Shape: (level, lat, lon)
+
+                if analysis.shape != first_an.shape:
+                    if analysis.shape[1] == first_an.shape[1] and analysis.shape[2] == first_an.shape[2]:
+                        self.logger.warn(f"Analysis level dimension mismatch. {first_step}: {first_an.shape}, {key}: {analysis.shape}")
+                        _, _, _, _, _, lev_an_full = self.get_coords(key)
+                        lev_analysis = (np.abs(lev_an_full - self.levhpa)).argmin()
+                        first_an = var_d[key]['analysis']
+                        self.logger.warn(f"New analysis level at {key}: lev[{lev_analysis}]: {self.levhpa}")
+                    else:
+                        self.logger.error(f"Analysis dimension mismatch. {first_step}: {first_an.shape}, {key}: {analysis.shape}")
+                if forecast.shape != first_fc.shape:
+                    if forecast.shape[1] == first_fc.shape[1] and forecast.shape[2] == first_fc.shape[2]:
+                        self.logger.warn(f"Forecast level dimension mismatch. {first_step}: {first_fc.shape}, {key}: {forecast.shape}")
+                        _, _, _, _, lev_fc_full, _ = self.get_coords(key)
+                        lev_forecast = (np.abs(lev_fc_full - self.levhpa)).argmin()
+                        first_fc = var_d[key]['forecast']
+                        self.logger.warn(f"New forecast level at {key}: lev[{lev_analysis}]: {self.levhpa}")
+                    else:
+                        self.logger.error(f"Forecast dimension mismatch. {first_step}: {first_fc.shape}, {key}: {forecast.shape}")
 
                 if len(analysis.shape) == 3:
                     analysis = analysis[lev_analysis,latini_an_idx:latfin_an_idx,lonini_an_idx:lonfin_an_idx]
