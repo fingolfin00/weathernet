@@ -158,6 +158,30 @@ class WeatherRun:
         self.Scaler                  = globals()[self.scalername]
         # self.acq_freq              = self.config["data"]["acquisition_frequency"]
         self.download_path           = self.work_root_path + self.config["data"]["download_path"]
+        # Prepare
+        if self.source == "ecmwf":
+            en_datatype = self.config["ecmwf"]["ensemble_dataype"]
+            self.head_forecast_fn = "forecast-"
+            self.head_analysis_fn = "analysis-"
+            self.forecast_root_path = self.download_path
+            self.analysis_root_path = self.forecast_root_path
+            self.orig_freq = self.config["ecmwf"]["origin_frequency"]
+            self.grib_dict_fc = {'dataType': en_datatype, 'cfVarName': self.var_forecast}
+            self.grib_dict_an = {'dataType': en_datatype, 'cfVarName': self.var_analysis}
+            self.analysis_path = self.analysis_root_path
+            self.forecast_path = self.forecast_root_path
+        elif self.source == "cmcc":
+            self.head_forecast_fn = "JLS"
+            self.head_analysis_fn = "JLD"
+            self.forecast_root_path = f"{self.config["cmcc"]["forecast_path"]}{self.config["cmcc"]["prod_freq_forecast"]}/{self.config["cmcc"]["file_format_forecast"]}/"
+            # self.analysis_root_path = f"/data/inputs/METOCEAN/rolling/model/atmos/ECMWF/IFS_010/3.1analysis/{folder_acq_freq_analysis}/netcdf/"
+            self.analysis_root_path = f"{self.config["cmcc"]["analysis_path"]}{self.config["cmcc"]["prod_freq_analysis"]}/{self.config["cmcc"]["file_format_analysis"]}/"
+            self.orig_freq = self.config["cmcc"]["origin_frequency"]
+            self.grib_dict_fc = {'cfVarName': self.var_forecast}
+            self.grib_dict_an = {'cfVarName': self.var_analysis}
+        else:
+            self.logger.error("Unsupported source type. Aborting...")
+            return
         # Train
         self.start_date              = datetime.datetime.fromisoformat(self.config["train"]["train_start_date"])
         self.end_date                = datetime.datetime.fromisoformat(self.config["train"]["train_end_date"])
@@ -296,6 +320,27 @@ class WeatherRun:
         os.environ["SSL_CERT_DIR"] = str(env_base_path / 'ssl')
         os.environ["REQUESTS_CA_BUNDLE"] = str(env_base_path / 'ssl' / 'tls-ca-bundle.pem')
 
+    def _get_anfc_paths (self, d, special_glob=False):
+        forecast_d = d - datetime.timedelta(days=self.forecast_delta)
+        if self.source == "ecmwf":
+            analysis_path = self.analysis_root_path
+            forecast_path = self.forecast_root_path
+            analysis_fn_glob = f"{self.head_analysis_fn}{self.var_analysis}-{d.strftime(self.new_date_strformat)}-{d.strftime(self.new_date_strformat)}*"
+            forecast_fn_glob = f"{self.head_forecast_fn}{self.var_forecast}-{forecast_d.strftime(self.new_date_strformat)}-{d.strftime(self.new_date_strformat)}*"
+        elif self.source == "cmcc":
+            # analysis_path = f"{self.analysis_root_path}{d.strftime(folder_date_strformat)}/"
+            analysis_path = f"{self.analysis_root_path}{d.strftime("%Y")}/{d.strftime("%m")}/"
+            forecast_path = f"{self.forecast_root_path}{forecast_d.strftime(self.folder_date_strformat)}/"
+            if special_glob:
+                # Here we need to select the 00001 ending to avoid the 00011 which has got different variables. This is a workaround, not robust
+                analysis_fn_glob = f"{self.head_analysis_fn}{d.strftime(self.forecast_date_strformat)}*01"
+            else:
+                # No need of *01 here because the time format 0000 is already excluding the 00011 ending. This is by chance, keep an eye
+                analysis_fn_glob = f"{self.head_analysis_fn}{d.strftime(self.forecast_date_strformat)}{d.strftime(self.forecast_date_strformat)}*" 
+            # analysis_fn_glob = f"{d.strftime(folder_date_strformat)}-ECMWF---AM0100-MEDATL-b{d.strftime(folder_date_strformat)}_an{h.strftime("%M")}-fv11.00.nc"
+            forecast_fn_glob = f"{self.head_forecast_fn}{forecast_d.strftime(self.forecast_date_strformat)}{d.strftime(self.forecast_date_strformat)}*"
+        return analysis_path, forecast_path, analysis_fn_glob, forecast_fn_glob
+
     def prepare_data (self, type):
         self.logger.info(f"Prepare {type} data")
         data_fn = self._get_data_fn_from_type(type)
@@ -314,31 +359,9 @@ class WeatherRun:
         else:
             self.logger.error(f"Unsupported type {type}")
             coords_d = None
-        # Prepare variables
-        if self.source == "ecmwf":
-            en_datatype = self.config["ecmwf"]["ensemble_dataype"]
-            head_forecast_fn = "forecast-"
-            head_analysis_fn = "analysis-"
-            forecast_root_path = self.download_path
-            analysis_root_path = forecast_root_path
-            orig_freq = self.config["ecmwf"]["origin_frequency"]
-            grib_dict_fc = {'dataType': en_datatype, 'cfVarName': self.var_forecast}
-            grib_dict_an = {'dataType': en_datatype, 'cfVarName': self.var_analysis}
-        elif self.source == "cmcc":
-            head_forecast_fn = "JLS"
-            head_analysis_fn = "JLD"
-            forecast_root_path = f"{self.config["cmcc"]["forecast_path"]}{self.config["cmcc"]["prod_freq_forecast"]}/{self.config["cmcc"]["file_format_forecast"]}/"
-            # analysis_root_path = f"/data/inputs/METOCEAN/rolling/model/atmos/ECMWF/IFS_010/3.1analysis/{folder_acq_freq_analysis}/netcdf/"
-            analysis_root_path = f"{self.config["cmcc"]["analysis_path"]}{self.config["cmcc"]["prod_freq_analysis"]}/{self.config["cmcc"]["file_format_analysis"]}/"
-            orig_freq = self.config["cmcc"]["origin_frequency"]
-            grib_dict_fc = {'cfVarName': self.var_forecast}
-            grib_dict_an = {'cfVarName': self.var_analysis}
-        else:
-            self.logger.error("Unsupported source type. Aborting...")
-            return
 
         # Get the data
-        date_range = pd.date_range(start=start_date, end=end_date, freq=orig_freq).to_pydatetime().tolist()
+        date_range = pd.date_range(start=start_date, end=end_date, freq=self.orig_freq).to_pydatetime().tolist()
         self.logger.info(f"Get {self.var_forecast} (forecast), {self.var_analysis} (analysis) from {start_date.strftime(self.print_date_strformat)} to {end_date.strftime(self.print_date_strformat)}")
         var_d = {}
         missed_samples = []
@@ -350,20 +373,7 @@ class WeatherRun:
             # self.logger.debug(d)
             # self.logger.debug(forecast_d)
             # acq_range = pd.date_range(start=d, end=d+datetime.timedelta(days=1), freq=acq_freq).to_pydatetime().tolist()
-            if self.source == "ecmwf":
-                analysis_path = analysis_root_path
-                forecast_path = forecast_root_path
-                analysis_fn_glob = f"{head_analysis_fn}{self.var_analysis}-{d.strftime(self.new_date_strformat)}-{d.strftime(self.new_date_strformat)}*"
-                forecast_fn_glob = f"{head_forecast_fn}{self.var_forecast}-{forecast_d.strftime(self.new_date_strformat)}-{d.strftime(self.new_date_strformat)}*"
-            elif self.source == "cmcc":
-                # analysis_path = f"{analysis_root_path}{d.strftime(folder_date_strformat)}/"
-                analysis_path = f"{analysis_root_path}{d.strftime("%Y")}/{d.strftime("%m")}/"
-                forecast_path = f"{forecast_root_path}{forecast_d.strftime(self.folder_date_strformat)}/"
-                # No need of *01 here because the time format 0000 is already excluding the 00011 ending. This is by chance, keep an eye
-                analysis_fn_glob = f"{head_analysis_fn}{d.strftime(self.forecast_date_strformat)}{d.strftime(self.forecast_date_strformat)}*" 
-                # analysis_fn_glob = f"{d.strftime(folder_date_strformat)}-ECMWF---AM0100-MEDATL-b{d.strftime(folder_date_strformat)}_an{h.strftime("%M")}-fv11.00.nc"
-                forecast_fn_glob = f"{head_forecast_fn}{forecast_d.strftime(self.forecast_date_strformat)}{d.strftime(self.forecast_date_strformat)}*"
-            
+            analysis_path, forecast_path, analysis_fn_glob, forecast_fn_glob = self._get_anfc_paths(d)
             # self.logger.debug(forecast_fn_glob)
             # self.logger.debug(analysis_fn_glob)
             errormsg = None
@@ -378,8 +388,8 @@ class WeatherRun:
                     # If exact +deltaforecast is not present attempt to estimate with nearest +-1h forecasts
                     minus1h_d = d - datetime.timedelta(hours=1)
                     plus1h_d = d + datetime.timedelta(hours=1)
-                    forecast_minus1h_fn_glob = f"{head_forecast_fn}{forecast_d.strftime(self.forecast_date_strformat)}{minus1h_d.strftime(self.forecast_date_strformat)}*"
-                    forecast_plus1h_fn_glob = f"{head_forecast_fn}{forecast_d.strftime(self.forecast_date_strformat)}{plus1h_d.strftime(self.forecast_date_strformat)}*"
+                    forecast_minus1h_fn_glob = f"{self.head_forecast_fn}{forecast_d.strftime(self.forecast_date_strformat)}{minus1h_d.strftime(self.forecast_date_strformat)}*"
+                    forecast_plus1h_fn_glob = f"{self.head_forecast_fn}{forecast_d.strftime(self.forecast_date_strformat)}{plus1h_d.strftime(self.forecast_date_strformat)}*"
                     self.logger.info("Try nearest +-1h forecasts...")
                     try:
                         forecast_minus1h_fn = glob.glob(forecast_path + forecast_minus1h_fn_glob)[0]
@@ -410,7 +420,7 @@ class WeatherRun:
                 self.logger.info(analysis_fn)
                 ds_analysis = xr.open_dataset(
                     analysis_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
-                    backend_kwargs={'filter_by_keys': grib_dict_an}
+                    backend_kwargs={'filter_by_keys': self.grib_dict_an}
                 )
                 an_values = ds_analysis.variables[self.var_analysis].values
                 # ds_analysis = nc.Dataset(analysis_fn)
@@ -426,11 +436,11 @@ class WeatherRun:
                 if nearest_minus1h_forecast_flag and nearest_plus1h_forecast_flag:
                     ds_forecast_minus1h = xr.open_dataset(
                         forecast_minus1h_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
-                        backend_kwargs={'filter_by_keys': grib_dict_fc}
+                        backend_kwargs={'filter_by_keys': self.grib_dict_fc}
                     )
                     ds_forecast_plus1h = xr.open_dataset(
                         forecast_plus1h_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
-                        backend_kwargs={'filter_by_keys': grib_dict_fc}
+                        backend_kwargs={'filter_by_keys': self.grib_dict_fc}
                     )
                     self.logger.warning("Average +-1h forecasts...")
                     fc_values = np.mean( np.array([ ds_forecast_plus1h.variables[self.var_forecast].values, ds_forecast_minus1h.variables[self.var_forecast].values ]), axis=0 )
@@ -439,18 +449,18 @@ class WeatherRun:
                         self.logger.warning("Use -1h forecast...")
                         ds_forecast = xr.open_dataset(
                             forecast_minus1h_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
-                            backend_kwargs={'filter_by_keys': grib_dict_fc}
+                            backend_kwargs={'filter_by_keys': self.grib_dict_fc}
                         )
                     elif nearest_plus1h_forecast_flag:
                         self.logger.warning("Use +1h forecast...")
                         ds_forecast = xr.open_dataset(
                             forecast_plus1h_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
-                            backend_kwargs={'filter_by_keys': grib_dict_fc}
+                            backend_kwargs={'filter_by_keys': self.grib_dict_fc}
                         )
                     else:
                         ds_forecast = xr.open_dataset(
                             forecast_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
-                            backend_kwargs={'filter_by_keys': grib_dict_fc}
+                            backend_kwargs={'filter_by_keys': self.grib_dict_fc}
                         )
                     fc_values = ds_forecast.variables[self.var_forecast].values
                 # ds_forecast = xr.open_dataset(forecast_fn, engine="cfgrib", indexpath="")
@@ -475,29 +485,33 @@ class WeatherRun:
         self.logger.debug(f"Missed samples: {missed_samples}")
         var_d['samples'] = counter_samples
         var_d['missed'] = missed_samples
-        # Get coordinate data        
-        if self.source == "ecmwf":
-            analysis_fn_coords_glob = f"analysis-{self.var_analysis}-{coords_d.strftime(self.new_date_strformat)}-{coords_d.strftime(self.new_date_strformat)}*"
-            forecast_fn_coords_glob = f"forecast-{self.var_forecast}-{(coords_d-datetime.timedelta(days=self.forecast_delta)).strftime(self.new_date_strformat)}-{coords_d.strftime(self.new_date_strformat)}*"
-            forecast_coords_path = forecast_path
-            analysis_coords_path = analysis_path
-        elif self.source == "cmcc":
-            forecast_fn_coords_glob = f"{head_forecast_fn}{coords_d.strftime(self.forecast_date_strformat)}*"
-            # Here we need to select the 00001 ending to avoid the 00011 which has got different variables. This is a workaround, not robust
-            analysis_fn_coords_glob = f"{head_analysis_fn}{coords_d.strftime(self.forecast_date_strformat)}*01"
-            # analysis_fn_coords_glob = f"{coords_d.strftime(folder_date_strformat)}-ECMWF---AM0100-MEDATL-b{coords_d.strftime(folder_date_strformat)}_an00-fv11.00.nc"
-            forecast_coords_path = f"{forecast_root_path}{coords_d.strftime(self.folder_date_strformat)}/"
-            analysis_coords_path = f"{analysis_root_path}{coords_d.strftime("%Y")}/{coords_d.strftime("%m")}/"
+
+        # Get coords data
+        lon_fc_full, lon_an_full, lat_fc_full, lat_an_full, lev_fc_full, lev_an_full = self.get_coords(coords_d)
+        var_d['lon'] = {'analysis': lon_an_full}
+        var_d['lat'] = {'analysis': lat_an_full}
+        var_d['lev'] = {'analysis': lev_an_full}
+        var_d['lon']['forecast'] = lon_fc_full
+        var_d['lat']['forecast'] = lat_fc_full
+        var_d['lev']['forecast'] = lev_fc_full
+
+        # Save data
+        self.logger.info(f"Saving data in {data_fn}")
+        with open(f"{data_fn}", 'wb') as f:
+            np.savez(f"{data_fn}", var_d, allow_pickle=True)
+
+    def get_coords (self, coords_d):
+        analysis_coords_path, forecast_coords_path, analysis_fn_coords_glob, forecast_fn_coords_glob = self._get_anfc_paths(coords_d, special_glob=True)
         forecast_coords_fn = glob.glob(forecast_coords_path + forecast_fn_coords_glob)[0]
         analysis_coords_fn = glob.glob(analysis_coords_path + analysis_fn_coords_glob)[0]
 
         ds_forecast_coords = xr.open_dataset(
             forecast_coords_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
-            backend_kwargs={'filter_by_keys': grib_dict_fc}
+            backend_kwargs={'filter_by_keys': self.grib_dict_fc}
         )
         ds_analysis_coords = xr.open_dataset(
             analysis_coords_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
-            backend_kwargs={'filter_by_keys': grib_dict_an}
+            backend_kwargs={'filter_by_keys': self.grib_dict_an}
         )
 
         coord_lon_names = ['longitude', 'lon']
@@ -533,17 +547,7 @@ class WeatherRun:
         lev_fc_full = ds_forecast_coords['isobaricInhPa'].values
         lev_an_full = ds_analysis_coords['isobaricInhPa'].values
 
-        var_d['lon'] = {'analysis': lon_an_full}
-        var_d['lat'] = {'analysis': lat_an_full}
-        var_d['lev'] = {'analysis': lev_an_full}
-        var_d['lon']['forecast'] = lon_fc_full
-        var_d['lat']['forecast'] = lat_fc_full
-        var_d['lev']['forecast'] = lev_fc_full
-
-        # Save data
-        self.logger.info(f"Saving data in {data_fn}")
-        with open(f"{data_fn}", 'wb') as f:
-            np.savez(f"{data_fn}", var_d, allow_pickle=True)
+        return lon_fc_full, lon_an_full, lat_fc_full, lat_an_full, lev_fc_full, lev_an_full
 
     def get_data_from_fn (self, data_fn):
         with open(f"{data_fn}", 'rb') as f:
