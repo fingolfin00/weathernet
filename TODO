@@ -1,12 +1,9 @@
 Things to do
 
-1. Add support for multiple hyperparameters # DONE
+1. Log plots in lightning tensorboard. At each validation step we plot the prediction
 2. Logging with colorlog is fine, but internal lightning logs has different format, look if it is possible to align them together
 3. Would be nice to launch tensorboard from the script, currentyl it doesn't work
 4. Implement a checkpoint system to resume where last artifacts was created, at least in terms of weight # ALMOST DONE
-5. Load prepared dataset only once # DONE
-6. Add logging for the overall hyper combo run # DONE
-7. Make data preparation more robust # DONE
-8. Add support for removing seasonal cycle # DONE?
-9. Maybe restructure using xarray?
-10. Add intermediate plotting for data preparation and loading
+5. Maybe restructure using xarray?
+6. Add intermediate plotting for data preparation and loading
+7. Support different full domain size so we can use early forecast/analysis couples. Need to interpolate probably
