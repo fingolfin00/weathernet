@@ -139,6 +139,7 @@ class WeatherRun:
             self.log_filename        = self.log_folder + self.run_name + ".log"
         self.tl_root_logdir          = self.run_root_path
         self.tl_logdir               = f"{self.tl_root_logdir}{self.run_base_name}/lightning_logs/"
+        self.accumulate_grad_batches = self.config["global"]["accumulate_grad_batches"]
         # GPU
         self.device                  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # Data
@@ -936,7 +937,15 @@ class WeatherRun:
             #     self.logger.info("target stats:", y.min(), y.max(), y.mean())
             #     raise
             # Train
-            trainer = L.Trainer(max_epochs=self.epochs, log_every_n_steps=1, logger=tl_logger)
+            trainer = L.Trainer(
+                max_epochs=self.epochs,
+                precision="16-mixed",
+                gradient_clip_val=1.0,           # Recommended starting value (e.g., 0.5, 1.0, 5.0)
+                gradient_clip_algorithm="norm",  # "norm" for clipping by norm, "value" for clipping by value
+                log_every_n_steps=1,
+                logger=tl_logger,
+                accumulate_grad_batches=self.accumulate_grad_batches
+            )
             trainer.fit(self.model, train_dataloader, validation_dataloader)
             # Save model weights
             self.save_weights()
@@ -953,7 +962,15 @@ class WeatherRun:
         self.logger.info(f"Load weights from file: {self._get_weights_fn()}")
         self.model.load_state_dict(torch.load(f"{self.weights_folder}{self._get_weights_fn()}", map_location=self.device))
         # Test
-        trainer = L.Trainer(max_epochs=self.epochs, log_every_n_steps=1)
+        trainer = L.Trainer(
+            max_epochs=self.epochs,
+            precision="16-mixed",
+            gradient_clip_val=1.0,           # Recommended starting value (e.g., 0.5, 1.0, 5.0)
+            gradient_clip_algorithm="norm",  # "norm" for clipping by norm, "value" for clipping by value
+            log_every_n_steps=1,
+            logger=tl_logger,
+            accumulate_grad_batches=self.accumulate_grad_batches
+        )
         output_d = trainer.test(self.model, dataloaders=test_dataloader)
         # all_outputs = self.model.test_step_outputs
         # self.logger.debug(f"Available keys in model output: {all_outputs[-1].keys()}")
