@@ -100,28 +100,71 @@ class WeatherRun:
     def __init__ (self, weather_config, hyper, run, dryrun=False):
         # User configuration
         self.config                  = weather_config.config
-        # Global
-        self.run_base_name           = self.config["global"]["run_name"]
-        self.run_number              = run
-        self.run_name                = self.run_base_name + "_" + self.run_number
-        self.run_root_path           = self.config["global"]["run_root_path"]
-        self.run_base_path           = self.run_root_path + self.run_base_name + "/"
-        self.run_path                = self.run_base_path  + self.run_number + "/"
-        self.work_root_path          = self.config["global"]["work_root_path"]
-        self.netname                 = self.config["global"]["net"]
-        self.Net                     = globals()[self.netname]
-        self.save_data_folder        = self.work_root_path + self.config["global"]["save_data_path"]
-        self.folder_freq             = "1d"
+        # Hyperparameters
+        self.hyper_dict              = hyper
+        self.learning_rate           = self.hyper_dict["learning_rate"]
+        self.batch_size              = self.hyper_dict["batch_size"]
+        self.epochs                  = self.hyper_dict["epochs"]
+        self.loss                    = self.hyper_dict["loss"]
+        self.norm_strategy           = self.hyper_dict["norm_strategy"]
+        self.supervised              = self.hyper_dict["supervised"]
+        self.supervised_str = "supervised" if self.supervised else "unsupervised"
+        criterion = getattr(nn, self.loss)
+        self.criterion = criterion()
+        self.norm = getattr(nn, self.norm_strategy)
+        # Data
+        self.var_forecast            = self.config["data"]["var_forecast"]
+        self.var_analysis            = self.config["data"]["var_analysis"]
+        self.error_limit             = self.config["data"]["error_limit"]
+        self.levhpa                  = self.config["data"]["levhpa"]
+        self.lonini, self.lonfin     = self.config["data"]["lonini"], self.config["data"]["lonfin"]
+        self.latini, self.latfin     = self.config["data"]["latini"], self.config["data"]["latfin"]
+        self.anomaly                 = self.config["data"]["anomaly"]
+        self.deseason                = self.config["data"]["deseason"]
+        self.detrend                 = self.config["data"]["detrend"]
+        self.size_an                 = self.config["data"]["domain_size"] # set a square domain starting from lonini and latini, lonfin and latfin are ignored
+        self.forecast_delta          = self.config["data"]["forecast_delta"]
+        self.source                  = self.config["data"]["source"]
+        self.scalername              = self.config["data"]["scaler_name"]
+        self.Scaler                  = globals()[self.scalername]
+        # self.acq_freq              = self.config["data"]["acquisition_frequency"]
+        # Train
+        self.start_date              = datetime.datetime.fromisoformat(self.config["train"]["train_start_date"])
+        self.end_date                = datetime.datetime.fromisoformat(self.config["train"]["train_end_date"])
+        # Test
+        self.test_start_date         = datetime.datetime.fromisoformat(self.config["test"]["test_start_date"])
+        self.test_end_date           = datetime.datetime.fromisoformat(self.config["test"]["test_end_date"])
+        self.cmap                    = self.config["test"]["cmap"]
+        self.cmap_anomaly            = self.config["test"]["cmap_anomaly"]
+        self.cmap_error              = self.config["test"]["cmap_error"]
+        # Suffices for file names
+        self.suffix = "_anomaly" if self.anomaly else ""
+        self.suffix += "_detrend" if self.detrend else ""
+        self.suffix += "_deseason" if self.deseason else ""
+        # Formats, extensions and misc
         self.print_date_strformat    = self.config["global"]["print_date_strformat"]
         self.folder_date_strformat   = "%Y%m%d"
         self.forecast_date_strformat = "%m%d%H%M"
         self.new_date_strformat      = "%Y%m%d%H%M"
         self.plot_date_strformat     = "%Y%m%d-%H%M"
         self.data_extension          = ".npy.npz"
+        self.non_sample_keys         = ['lon', 'lat', 'lev', 'samples', 'missed']
+        # Run and paths
+        self.netname                 = self.config["global"]["net"]
+        self.Net                     = globals()[self.netname]
+        self.run_base_name           = f"{self.var_forecast}-{self.var_analysis}{self.suffix}_{self.start_date.strftime(self.forecast_date_strformat)}-{self.end_date.strftime(self.forecast_date_strformat)}_{self.netname}_{self.source}_{self.scalername}_{self.loss}_{self.norm_strategy}_{self.config["global"]["run_name_suffix"]}_{self.epochs}epochs-{self.batch_size}bs-{self.learning_rate}lr"
+        self.run_number              = run
+        self.run_name                = self.run_base_name + "_" + self.run_number
+        self.run_root_path           = self.config["global"]["run_root_path"]
+        self.run_base_path           = self.run_root_path + self.run_base_name + "/"
+        self.run_path                = self.run_base_path  + self.run_number + "/"
+        self.work_root_path          = self.config["global"]["work_root_path"]
+        self.download_path           = self.work_root_path + self.config["data"]["download_path"]
+        self.save_data_folder        = self.work_root_path + self.config["global"]["save_data_path"]
+        self.folder_freq             = "1d"
         # self.extra_data_folder       = self.run_path + self.config["global"]["extra_data_path"]
         self.fig_folder              = self.run_path + self.config["global"]["figure_path"]
         self.weights_folder          = self.run_path + self.config["global"]["weights_path"]
-        self.non_sample_keys         = ['lon', 'lat', 'lev', 'samples', 'missed']
         # Log
         self.log_level_str           = self.config["global"]["log_level"]
         self.log_level               = getattr(logging, self.log_level_str.upper())
@@ -143,23 +186,6 @@ class WeatherRun:
         self.accumulate_grad_batches = self.config["global"]["accumulate_grad_batches"]
         # GPU
         self.device                  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        # Data
-        self.var_forecast            = self.config["data"]["var_forecast"]
-        self.var_analysis            = self.config["data"]["var_analysis"]
-        self.error_limit             = self.config["data"]["error_limit"]
-        self.levhpa                  = self.config["data"]["levhpa"]
-        self.lonini, self.lonfin     = self.config["data"]["lonini"], self.config["data"]["lonfin"]
-        self.latini, self.latfin     = self.config["data"]["latini"], self.config["data"]["latfin"]
-        self.anomaly                 = self.config["data"]["anomaly"]
-        self.deseason                = self.config["data"]["deseason"]
-        self.detrend                 = self.config["data"]["detrend"]
-        self.size_an                 = self.config["data"]["domain_size"] # set a square domain starting from lonini and latini, lonfin and latfin are ignored
-        self.source                  = self.config["data"]["source"]
-        self.forecast_delta          = self.config["data"]["forecast_delta"]
-        self.scalername              = self.config["data"]["scaler_name"]
-        self.Scaler                  = globals()[self.scalername]
-        # self.acq_freq              = self.config["data"]["acquisition_frequency"]
-        self.download_path           = self.work_root_path + self.config["data"]["download_path"]
         # Prepare
         if self.source == "ecmwf":
             en_datatype = self.config["ecmwf"]["ensemble_dataype"]
@@ -184,19 +210,6 @@ class WeatherRun:
         else:
             self.logger.error("Unsupported source type. Aborting...")
             return
-        # Train
-        self.start_date              = datetime.datetime.fromisoformat(self.config["train"]["train_start_date"])
-        self.end_date                = datetime.datetime.fromisoformat(self.config["train"]["train_end_date"])
-        # Test
-        self.test_start_date         = datetime.datetime.fromisoformat(self.config["test"]["test_start_date"])
-        self.test_end_date           = datetime.datetime.fromisoformat(self.config["test"]["test_end_date"])
-        self.cmap                    = self.config["test"]["cmap"]
-        self.cmap_anomaly            = self.config["test"]["cmap_anomaly"]
-        self.cmap_error              = self.config["test"]["cmap_error"]
-        # Suffices for file names
-        self.suffix = "_anomaly" if self.anomaly else ""
-        self.suffix += "_detrend" if self.detrend else ""
-        self.suffix += "_deseason" if self.deseason else ""
         # Make folders if necessary
         if not dryrun:
             os.makedirs(self.save_data_folder, exist_ok=True)
@@ -205,18 +218,6 @@ class WeatherRun:
             os.makedirs(self.weights_folder, exist_ok=True)
             os.makedirs(self.tl_logdir, exist_ok=True)
         os.makedirs(self.log_folder, exist_ok=True)
-        # Hyperparameters
-        self.hyper_dict              = hyper
-        self.learning_rate           = self.hyper_dict["learning_rate"]
-        self.batch_size              = self.hyper_dict["batch_size"]
-        self.epochs                  = self.hyper_dict["epochs"]
-        self.loss                    = self.hyper_dict["loss"]
-        self.norm_strategy           = self.hyper_dict["norm_strategy"]
-        self.supervised              = self.hyper_dict["supervised"]
-        self.supervised_str = "supervised" if self.supervised else "unsupervised"
-        criterion = getattr(nn, self.loss)
-        self.criterion = criterion()
-        self.norm = getattr(nn, self.norm_strategy)
         # Model
         self.model = self.Net(
                         learning_rate=self.learning_rate,
