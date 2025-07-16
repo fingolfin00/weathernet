@@ -3,21 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
 import lightning as L
-from torchmetrics.image import SpatialCorrelationCoefficient
-
-class CustomLightningModule(L.LightningModule):
-    def __init__(self, extra_logger):
-        super().__init__()
-        self.extra_logger = extra_logger
-
-    def _squeeze_and_add_log_img(self, x, c, n, s, tl):
-        if not self.trainer.sanity_checking and self.global_step % 100 == 0:
-            sq_x = torch.squeeze(x[n:n+1, c:c+1, :, :], 0)
-            self.extra_logger.debug(f"{s} x, squeezed, channel {c}, sample {n}: {sq_x.shape}")
-            tl.add_image(f"{s} c:{c}, n:{n}", sq_x, self.global_step)
-
-    def _print_debug(self, x, s):
-        self.extra_logger.debug(f"{s} x: {x.shape}, device: {x.device}")
+from metrics import CustomLightningModule
 
 class ResNetUNetEncoder(CustomLightningModule):
     """
@@ -141,13 +127,12 @@ class ResNetUNetDecoder(CustomLightningModule):
 
         return output
 
-class WeatherResNetUNet(L.LightningModule):
+class WeatherResNetUNet(CustomLightningModule):
     """
-    Complete UNet model with clean architecture
+    UNet model for weather
     """
     def __init__(self, loss, learning_rate, norm, supervised, extra_logger):
-        super().__init__()
-        self.extra_logger = extra_logger
+        super().__init__(extra_logger=extra_logger)
         self.loss = loss
         self.learning_rate = learning_rate
         self.supervised = supervised
@@ -155,17 +140,6 @@ class WeatherResNetUNet(L.LightningModule):
         # Components
         self.encoder = ResNetUNetEncoder(norm=norm, extra_logger=extra_logger)
         self.decoder = ResNetUNetDecoder(extra_logger=extra_logger)
-
-        # Metrics
-        self.scc = SpatialCorrelationCoefficient()
-
-        # Metrics storage
-        self.test_step_outputs = []
-        self.val_step_outputs = []
-
-        # Log model info
-        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        self.extra_logger.info(f"Trainable parameters: {trainable_params:,}")
 
     def forward(self, x):
         """
@@ -178,89 +152,6 @@ class WeatherResNetUNet(L.LightningModule):
         encoder_features = self.encoder(x)
         output = self.decoder(encoder_features)
         return output
-
-    def training_step(self, batch, batch_idx):
-        if self.supervised:
-            x, y = batch
-            pred = self(x)
-            loss = self.loss(pred, y)
-        else:
-            x, _ = batch
-            pred = self(x)
-            loss = self.loss(pred, x)
-
-        self.log("train_loss", loss, prog_bar=True)
-        return loss
-
-    def validation_step(self, batch, batch_idx):
-        return self._shared_eval_step(batch, batch_idx, "val_loss", self.val_step_outputs)
-
-    def test_step(self, batch, batch_idx):
-        return self._shared_eval_step(batch, batch_idx, "test_loss", self.test_step_outputs)
-
-    def _shared_eval_step(self, batch, batch_idx, loss_name, outputs_list):
-        """Shared logic for validation and test steps"""
-        x, y = batch
-        pred = self(x)
-        loss = self.loss(pred, y)
-
-        # Calculate metrics
-        mae = F.l1_loss(pred, y, reduction='mean')
-        rmse = torch.sqrt(F.mse_loss(pred, y, reduction='mean'))
-        scc = self.scc(pred, y)
-
-        # Store results
-        result = {
-            loss_name: loss.detach(),
-            "preds": pred.detach().cpu(),
-            "targets": y.detach().cpu(),
-            "mae": mae.item(),
-            "rmse": rmse.item(),
-            "scc": scc.item()
-        }
-        outputs_list.append(result)
-
-        # Log metrics
-        self.log(loss_name, loss, prog_bar=True)
-        self.log("mae", mae, prog_bar=True)
-        self.log("rmse", rmse, prog_bar=True)
-        self.log("scc", scc, prog_bar=True)
-
-        return result
-
-    def on_validation_epoch_end(self):
-        """Process validation results"""
-        if self.val_step_outputs:
-            avg_mae = sum(out["mae"] for out in self.val_step_outputs) / len(self.val_step_outputs)
-            avg_rmse = sum(out["rmse"] for out in self.val_step_outputs) / len(self.val_step_outputs)
-            avg_scc = sum(out["scc"] for out in self.val_step_outputs) / len(self.val_step_outputs)
-
-            self.log("val_mae_epoch", avg_mae)
-            self.log("val_rmse_epoch", avg_rmse)
-            self.log("val_scc_epoch", avg_scc)
-
-            self.val_step_outputs.clear()
-
-    def on_test_epoch_end(self):
-        """Process test results and store for external access"""
-        if self.test_step_outputs:
-            # Store predictions and targets
-            self.test_preds = torch.cat([out["preds"] for out in self.test_step_outputs], dim=0)
-            self.test_targets = torch.cat([out["targets"] for out in self.test_step_outputs], dim=0)
-
-            # Calculate and store metrics
-            self.test_mae = [out["mae"] for out in self.test_step_outputs]
-            self.test_rmse = [out["rmse"] for out in self.test_step_outputs]
-            self.test_scc = [out["scc"] for out in self.test_step_outputs]
-
-            # Log summary
-            avg_mae = sum(self.test_mae) / len(self.test_mae)
-            avg_rmse = sum(self.test_rmse) / len(self.test_rmse)
-            avg_scc = sum(self.test_scc) / len(self.test_scc)
-
-            self.extra_logger.info(f"Test Results - MAE: {avg_mae:.4f}, RMSE: {avg_rmse:.4f}, SCC: {avg_scc:.4f}")
-
-            self.test_step_outputs.clear()
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.learning_rate)
