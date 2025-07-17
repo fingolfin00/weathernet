@@ -152,7 +152,7 @@ class WeatherRun:
         # Run and paths
         self.netname                 = self.config["global"]["net"]
         self.Net                     = globals()[self.netname]
-        self.run_base_name           = f"{self.var_forecast}-{self.var_analysis}{self.suffix}_{self.start_date.strftime(self.forecast_date_strformat)}-{self.end_date.strftime(self.forecast_date_strformat)}_{self.netname}_{self.source}_{self.scalername}_{self.loss}_{self.norm_strategy}_{self.config["global"]["run_name_suffix"]}_{self.epochs}epochs-{self.batch_size}bs-{self.learning_rate}lr"
+        self.run_base_name           = f"{self.var_forecast}-{self.var_analysis}{self.suffix}_{self.start_date.strftime(self.folder_date_strformat)}-{self.end_date.strftime(self.folder_date_strformat)}_{self.netname}_{self.source}_{self.scalername}_{self.loss}_{self.norm_strategy}_{self.config["global"]["run_name_suffix"]}_{self.epochs}epochs-{self.batch_size}bs-{self.learning_rate}lr"
         self.run_number              = run
         self.run_name                = self.run_base_name + "_" + self.run_number
         self.run_root_path           = self.config["global"]["run_root_path"]
