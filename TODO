@@ -1,9 +1,11 @@
 Things to do
 
-1. Log plots in lightning tensorboard. At each validation step we plot the prediction
-2. Logging with colorlog is fine, but internal lightning logs has different format, look if it is possible to align them together
+1. Log plots in lightning tensorboard. At each validation step we plot the prediction error # DONE
+2. Logging with colorlog is fine, but internal lightning logs has different format, look if it is possible to align them together # WON'T DO
 3. Would be nice to launch tensorboard from the script, currentyl it doesn't work
 4. Implement a checkpoint system to resume where last artifacts was created, at least in terms of weight # ALMOST DONE
 5. Maybe restructure using xarray?
 6. Add intermediate plotting for data preparation and loading
-7. Support different full domain size so we can use early forecast/analysis couples. Need to interpolate probably
+7. Support different full domain size so we can use early forecast/analysis couples. Need to interpolate probably # NOT A GOOD IDEA
+8. Normalization is very bad currently moving from CPU to GPU to CPU to GPU too many times. We should go fully pytorch reimplementing the scikit-learn scalers
+9. In combo run add the possibility to tun more models with the same setup
