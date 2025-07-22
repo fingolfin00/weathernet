@@ -16,11 +16,11 @@ class ResNetUNetEncoder(CustomLightningModule):
         # Load ResNet18 and modify for single channel input
         base_model = models.resnet18(norm_layer=norm)
 
-        # Input processing (256x256 -> 128x128)
-        self.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        # Input processing
+        self.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False) # 256x256 (1 channel) -> 128x128 (64 channels)
         self.bn1 = base_model.bn1
         self.relu = base_model.relu
-        self.maxpool = base_model.maxpool  # 128x128 -> 64x64
+        self.maxpool = base_model.maxpool  # 128x128 -> 64x64 (64 channels)
 
         # Encoder blocks
         self.layer1 = base_model.layer1  # 64x64 -> 64x64 (64 channels)
@@ -57,7 +57,7 @@ class DecoderBlock(nn.Module):
     """
     Single decoder block with upsampling and skip connection
     """
-    def __init__(self, in_channels, skip_channels, out_channels):
+    def __init__(self, in_channels, skip_channels, out_channels, norm):
         super().__init__()
 
         self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
@@ -65,8 +65,10 @@ class DecoderBlock(nn.Module):
         # Convolution after concatenation
         self.conv = nn.Sequential(
             nn.Conv2d(in_channels + skip_channels, out_channels, kernel_size=3, padding=1),
+            norm(in_channels + skip_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            norm(out_channels),
             nn.ReLU(inplace=True)
         )
 
@@ -89,14 +91,14 @@ class ResNetUNetDecoder(CustomLightningModule):
     """
     UNet decoder with explicit size handling
     """
-    def __init__(self, extra_logger):
+    def __init__(self, norm, extra_logger):
         super().__init__(extra_logger=extra_logger)
 
         # Decoder blocks (explicit channel management)
-        self.decoder4 = DecoderBlock(512, 256, 256)  # 8x8 -> 16x16
-        self.decoder3 = DecoderBlock(256, 128, 128)  # 16x16 -> 32x32
-        self.decoder2 = DecoderBlock(128, 64, 64)    # 32x32 -> 64x64
-        self.decoder1 = DecoderBlock(64, 0, 64)      # 64x64 -> 128x128 (no skip)
+        self.decoder4 = DecoderBlock(512, 256, 256, norm)  # 8x8 -> 16x16
+        self.decoder3 = DecoderBlock(256, 128, 128, norm)  # 16x16 -> 32x32
+        self.decoder2 = DecoderBlock(128, 64, 64, norm)    # 32x32 -> 64x64
+        self.decoder1 = DecoderBlock(64, 0, 64, norm)      # 64x64 -> 128x128 (no skip)
 
         # Final output layer
         self.final_upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
