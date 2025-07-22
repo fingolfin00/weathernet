@@ -115,6 +115,7 @@ class WeatherRun:
         # Data
         self.var_forecast            = self.config["data"]["var_forecast"]
         self.var_analysis            = self.config["data"]["var_analysis"]
+        self.interpolation_size      = self.config["data"]["interpolation_size"]
         self.error_limit             = self.config["data"]["error_limit"]
         self.levhpa                  = self.config["data"]["levhpa"]
         self.lonini, self.lonfin     = self.config["data"]["lonini"], self.config["data"]["lonfin"]
@@ -836,32 +837,6 @@ class WeatherRun:
         deseasonalized_monthly = da.groupby('time.month') - climatology_monthly
         return deseasonalized_monthly.values.reshape(N, C, H, W), climatology_monthly
 
-    def normalize (self, data):
-        # Remove channel dimension (channel number C is always 1)
-        N, C, H, W = np.shape(data)
-        self.logger.debug(f"Data before normalization: {np.shape(data)}")
-        data = np.squeeze(data, axis=1)
-        # Reshape along samples N
-        data = data.reshape(H, -1)
-        self.logger.debug(f"Reshaped data before normalization: {np.shape(data)}")
-        scaler = self.Scaler().fit(data)
-        scaled_data = scaler.transform(data)
-        self.logger.debug(f"Data after normalization: {np.shape(scaled_data)}")
-        scaled_data = scaled_data.reshape(N, C, H, W)
-        self.logger.debug(f"Reshaped data after normalization: {np.shape(scaled_data)}")
-        return scaled_data, scaler
-
-    def denormalize (self, scaled_data, scaler):
-        self.logger.debug(f"Data before denormalization: {np.shape(scaled_data)}")
-        N, C, H, W = np.shape(scaled_data)
-        scaled_data = np.squeeze(scaled_data, axis=1)
-        # Reshape along samples N
-        scaled_data = scaled_data.reshape(H, -1)
-        self.logger.debug(f"Reshaped data before denormalization: {np.shape(scaled_data)}")
-        data = scaler.inverse_transform(scaled_data)
-        data = data.reshape(N, C, H, W)
-        return data
-
     def _get_final_products_base_fn (self):
         return f"{self.model.__class__.__name__}_{self.supervised_str}_{self.var_forecast}-{self.var_analysis}-{self.levhpa}hPa_{self.lonini:+2.1f}-{self.latini:+2.1f}_{self.domain_size}x{self.domain_size}_{self.batch_size}bs-{self.learning_rate}lr-{self.epochs}epochs-{self.loss}_{self.norm_strategy}_{self.start_date.strftime(self.plot_date_strformat)}_{self.end_date.strftime(self.plot_date_strformat)}{self.suffix}"
 
@@ -913,10 +888,7 @@ class WeatherRun:
             num_workers = min(os.cpu_count(), 8)  # safe default
             # Tensorboard
             tl_logger = TensorBoardLogger(self.tl_logdir, name=self.run_base_name, version=self.run_number)
-            # Normalize data (example: min-max scaling to [0, 1])
-            X_np, _ = self.normalize(X_np)
-            y_np, _ = self.normalize(y_np)
-            dataset = WeatherDataset(X_np, y_np)
+            dataset = WeatherDataset(X_np, y_np, self.Scaler, self.interpolation_size, self.logger)
             # Split into train (90%) and test (10%)
             num_samples = X_np.shape[0]
             test_size = int(0.1 * num_samples)
@@ -959,10 +931,7 @@ class WeatherRun:
         num_workers = min(os.cpu_count(), 8)  # safe default
         # Tensorboard
         tl_logger = TensorBoardLogger(self.tl_logdir, name=self.run_base_name, version=f"test_{self.run_number}")
-        # Normalize data
-        X_np_test, X_scaler = self.normalize(X_np_test)
-        y_np_test, y_scaler = self.normalize(y_np_test)
-        test_dataset = WeatherDataset(X_np_test, y_np_test)
+        test_dataset = WeatherDataset(X_np_test, y_np_test, self.Scaler, self.interpolation_size, self.logger)
         # Create data loaders
         test_dataloader = DataLoader(test_dataset, batch_size=1, num_workers=num_workers, shuffle=False)
         # Load weights
@@ -990,9 +959,9 @@ class WeatherRun:
             targets.append(target[0,:,:,:].cpu())
             outputs.append(self.model.test_preds[idx,:,:,:])
         # Denormalize
-        inputs = self.denormalize(np.array(inputs), X_scaler)
-        targets = self.denormalize(np.array(targets), y_scaler)
-        predictions = self.denormalize(np.array(outputs), X_scaler)
+        inputs = test_dataset.denormalize_forecast(np.array(inputs))
+        targets = test_dataset.denormalize_analysis(np.array(targets))
+        predictions = test_dataset.denormalize_forecast(np.array(outputs))
         return inputs, targets, predictions
 
     def _is_port_in_use(self, port, host='0.0.0.0'):
@@ -1096,12 +1065,32 @@ class WeatherRun:
 
         return ax
 
+    def interpolate_coords (self, vector):
+        return np.interp(
+                np.linspace(0, len(vector) - 1, self.interpolation_size), # New x-coordinates (indices) spanning original range
+                np.arange(len(vector)),                                   # Original x-coordinates (indices)
+                vector                                                    # Original y-values (the vector itself)
+            )
     def plot_figures (self, date, inputs, targets, outputs, lonfc, latfc, lonan, latan):
         average_data_path = self._get_average_fn()
         average_d = self.get_data_from_fn(average_data_path)
-        # Remove channel dimension
-        average_fc = np.squeeze(average_d["forecast"], axis=1)
-        average_an = np.squeeze(average_d["analysis"], axis=1)
+        average_fc = average_d["forecast"]
+        average_an = average_d["analysis"]
+        if self.domain_size != self.interpolation_size:
+            lonfc = self.interpolate_coords(lonfc)
+            latfc = self.interpolate_coords(latfc)
+            lonan = self.interpolate_coords(lonan)
+            latan = self.interpolate_coords(latan)
+            average_fc = torch.from_numpy(average_fc).float()
+            average_an = torch.from_numpy(average_an).float()
+            average_fc = F.interpolate(average_fc, size=(self.interpolation_size, self.interpolation_size), mode='bilinear', align_corners=False)
+            average_an = F.interpolate(average_an, size=(self.interpolation_size, self.interpolation_size), mode='bilinear', align_corners=False)
+            average_fc = np.squeeze(average_fc.numpy(), axis=1)
+            average_an = np.squeeze(average_an.numpy(), axis=1)
+        else:
+            # Remove channel dimension
+            average_fc = np.squeeze(average_d["forecast"], axis=1)
+            average_an = np.squeeze(average_d["analysis"], axis=1)
 
         sample_forecast = inputs
         sample_analysis = targets
@@ -1206,19 +1195,70 @@ class WeatherRun:
 
 
 class WeatherDataset(Dataset):
-    def __init__(self, forecasts, analyses):
+    def __init__(self, forecasts, analyses, Scaler, size, logger):
+        super().__init__()
+        self.logger = logger
+        self.Scaler = Scaler
         # Convert to PyTorch tensors (shape: [num_samples, 1, H, W])
         self.forecasts = torch.from_numpy(forecasts).float()
         self.analyses = torch.from_numpy(analyses).float()
+        # Interpolate if provided size is different from original size
+        if size != self.forecasts.shape[-2] or size != self.forecasts.shape[-1]:
+            self.logger.info(f"Interpolate forecasts to {size}x{size}") 
+            self.forecasts = F.interpolate(self.forecasts, size=(size, size), mode='bilinear', align_corners=False)
+        if size != self.analyses.shape[-2] or size != self.analyses.shape[-1]:
+            self.logger.info(f"Interpolate analyses to {size}x{size}")
+            self.analyses = F.interpolate(self.analyses, size=(size, size), mode='bilinear', align_corners=False)
         # Resize y to match model output
         if self.analyses.shape[-2] != self.forecasts.shape[-2] or self.analyses.shape[-1] != self.forecasts.shape[-1]:
-            self.forecasts = torch.nn.functional.interpolate(
+            self.forecasts = F.interpolate(
                 self.forecasts, 
                 size=(self.analyses.shape[-2], self.analyses.shape[-1]), 
                 mode='bilinear'  # or 'bicubic' for higher precision
             )
+        # Normalize data
+        self.forecasts, self.fc_scaler = self._normalize(self.forecasts.numpy())
+        self.analyses, self.an_scaler = self._normalize(self.analyses.numpy())
+        self.forecasts = torch.from_numpy(self.forecasts).float()
+        self.analyses = torch.from_numpy(self.analyses).float()
+        self.logger.info(f"Forecast tensor shape: {self.forecasts.shape}")
+        self.logger.info(f"Analysis tensor shape: {self.analyses.shape}")
+
+    def _normalize (self, data):
+        # Remove channel dimension (channel number C is always 1)
+        N, C, H, W = np.shape(data)
+        self.logger.debug(f"Data before normalization: {np.shape(data)}")
+        data = np.squeeze(data, axis=1)
+        # Reshape along samples N
+        data = data.reshape(H, -1)
+        self.logger.debug(f"Reshaped data before normalization: {np.shape(data)}")
+        scaler = self.Scaler().fit(data)
+        scaled_data = scaler.transform(data)
+        self.logger.debug(f"Data after normalization: {np.shape(scaled_data)}")
+        scaled_data = scaled_data.reshape(N, C, H, W)
+        self.logger.debug(f"Reshaped data after normalization: {np.shape(scaled_data)}")
+        return scaled_data, scaler
+
+    def _denormalize (self, scaled_data, scaler):
+        self.logger.debug(f"Data before denormalization: {np.shape(scaled_data)}")
+        N, C, H, W = np.shape(scaled_data)
+        scaled_data = np.squeeze(scaled_data, axis=1)
+        # Reshape along samples N
+        scaled_data = scaled_data.reshape(H, -1)
+        self.logger.debug(f"Reshaped data before denormalization: {np.shape(scaled_data)}")
+        data = scaler.inverse_transform(scaled_data)
+        data = data.reshape(N, C, H, W)
+        return data
+
+    def denormalize_forecast (self, fc_scaled_data):
+        return self._denormalize(fc_scaled_data, self.fc_scaler)
+
+    def denormalize_analysis (self, an_scaled_data):
+        return self._denormalize(an_scaled_data, self.an_scaler)
+
     def __len__(self):
-        return len(self.forecasts)
+        return len(self.forecasts) # assume forecast and analysis have the same N
+
     def __getitem__(self, idx):
         return self.forecasts[idx], self.analyses[idx]
 
