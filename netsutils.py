@@ -122,7 +122,7 @@ class WeatherRun:
         self.anomaly                 = self.config["data"]["anomaly"]
         self.deseason                = self.config["data"]["deseason"]
         self.detrend                 = self.config["data"]["detrend"]
-        self.size_an                 = self.config["data"]["domain_size"] # set a square domain starting from lonini and latini, lonfin and latfin are ignored
+        self.domain_size             = self.config["data"]["domain_size"] # set a square domain starting from lonini and latini, lonfin and latfin are ignored
         self.forecast_delta          = self.config["data"]["forecast_delta"]
         self.source                  = self.config["data"]["source"]
         self.scalername              = self.config["data"]["scaler_name"]
@@ -589,13 +589,13 @@ class WeatherRun:
         lev_analysis = (np.abs(lev_an_full - self.levhpa)).argmin()
         lev_forecast = (np.abs(lev_fc_full - self.levhpa)).argmin()
 
-        if self.size_an:
-            self.logger.info(f"Selected regular square size for analysis: {self.size_an}x{self.size_an}")
+        if self.domain_size:
+            self.logger.info(f"Selected regular square size for analysis: {self.domain_size}x{self.domain_size}")
             self.logger.info(f"Ignoring latfin: {latfin} and lonfin: {lonfin}")
             self.logger.debug(f"Lonfin before adding size_an: {lonfin_an_idx}")
             self.logger.debug(f"Latfin before adding size_an: {latfin_an_idx}")
-            lonfin_an_idx = lonini_an_idx + self.size_an
-            latfin_an_idx = latini_an_idx + self.size_an
+            lonfin_an_idx = lonini_an_idx + self.domain_size
+            latfin_an_idx = latini_an_idx + self.domain_size
             self.logger.debug(f"Lonfin after adding size_an: {lonfin_an_idx}")
             self.logger.debug(f"Latfin after adding size_an: {latfin_an_idx}")
             lonfin = lon_an_full[lonfin_an_idx]
@@ -863,7 +863,7 @@ class WeatherRun:
         return data
 
     def _get_final_products_base_fn (self):
-        return f"{self.model.__class__.__name__}_{self.supervised_str}_{self.var_forecast}-{self.var_analysis}-{self.levhpa}hPa_{self.lonini:+2.1f}-{self.latini:+2.1f}_{self.size_an}x{self.size_an}_{self.batch_size}bs-{self.learning_rate}lr-{self.epochs}epochs-{self.loss}_{self.norm_strategy}_{self.start_date.strftime(self.plot_date_strformat)}_{self.end_date.strftime(self.plot_date_strformat)}{self.suffix}"
+        return f"{self.model.__class__.__name__}_{self.supervised_str}_{self.var_forecast}-{self.var_analysis}-{self.levhpa}hPa_{self.lonini:+2.1f}-{self.latini:+2.1f}_{self.domain_size}x{self.domain_size}_{self.batch_size}bs-{self.learning_rate}lr-{self.epochs}epochs-{self.loss}_{self.norm_strategy}_{self.start_date.strftime(self.plot_date_strformat)}_{self.end_date.strftime(self.plot_date_strformat)}{self.suffix}"
 
     def _check_averages (self):
         if Path(f"{self._get_average_fn()}").is_file():
