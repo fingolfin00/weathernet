@@ -32,7 +32,7 @@
     latini                  = 49
     latfin                  = 25.5
     domain_size             = 128 # if set lonfin and latfin are ignored
-    interpolation_size      = 256
+    interpolation_size      = 128 # if different interpolation is triggered 
     detrend                 = false
     deseason                = false
     anomaly                 = false
