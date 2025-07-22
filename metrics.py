@@ -91,10 +91,6 @@ class CustomLightningModule(L.LightningModule):
         self.last_val_pred = None
         self.last_val_target = None
 
-        # Log model info
-        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        self.extra_logger.info(f"Trainable parameters: {trainable_params:,}") 
-
     def _squeeze_and_add_log_img(self, img_tensor, name_tag, logger_instance, colormap=None, vmin=None, vmax=None):
         """
         Logs a single 2D image to the logger, with optional colormap.

@@ -938,6 +938,9 @@ class WeatherRun:
             #     self.logger.info("out stats:", out.min(), out.max(), out.mean())
             #     self.logger.info("target stats:", y.min(), y.max(), y.mean())
             #     raise
+            # Log model info
+            trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            self.logger.info(f"Trainable parameters: {trainable_params:,}")
             # Train
             trainer = L.Trainer(
                 max_epochs=self.epochs,
