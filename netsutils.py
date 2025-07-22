@@ -1199,26 +1199,36 @@ class WeatherDataset(Dataset):
         super().__init__()
         self.logger = logger
         self.Scaler = Scaler
-        # Convert to PyTorch tensors (shape: [num_samples, 1, H, W])
-        self.forecasts = torch.from_numpy(forecasts).float()
-        self.analyses = torch.from_numpy(analyses).float()
+        self.forecasts = forecasts
+        self.analyses = analyses
         # Interpolate if provided size is different from original size
         if size != self.forecasts.shape[-2] or size != self.forecasts.shape[-1]:
+            # Convert to PyTorch tensors (shape: [num_samples, 1, H, W])
+            self.forecasts = torch.from_numpy(self.forecasts).float()
             self.logger.info(f"Interpolate forecasts to {size}x{size}") 
             self.forecasts = F.interpolate(self.forecasts, size=(size, size), mode='bilinear', align_corners=False)
+            self.forecasts = self.forecasts.numpy()
         if size != self.analyses.shape[-2] or size != self.analyses.shape[-1]:
+            # Convert to PyTorch tensors (shape: [num_samples, 1, H, W])
+            self.analyses = torch.from_numpy(self.analyses).float()
             self.logger.info(f"Interpolate analyses to {size}x{size}")
             self.analyses = F.interpolate(self.analyses, size=(size, size), mode='bilinear', align_corners=False)
+            self.analyses = self.analyses.numpy()
         # Resize y to match model output
         if self.analyses.shape[-2] != self.forecasts.shape[-2] or self.analyses.shape[-1] != self.forecasts.shape[-1]:
+            # Convert to PyTorch tensors (shape: [num_samples, 1, H, W])
+            self.forecasts = torch.from_numpy(self.forecasts).float()
+            self.analyses = torch.from_numpy(self.analyses).float()
             self.forecasts = F.interpolate(
                 self.forecasts, 
                 size=(self.analyses.shape[-2], self.analyses.shape[-1]), 
                 mode='bilinear'  # or 'bicubic' for higher precision
             )
+            self.forecasts = self.forecasts.numpy()
+            self.analyses = self.analyses.numpy()
         # Normalize data
-        self.forecasts, self.fc_scaler = self._normalize(self.forecasts.numpy())
-        self.analyses, self.an_scaler = self._normalize(self.analyses.numpy())
+        self.forecasts, self.fc_scaler = self._normalize(self.forecasts)
+        self.analyses, self.an_scaler = self._normalize(self.analyses)
         self.forecasts = torch.from_numpy(self.forecasts).float()
         self.analyses = torch.from_numpy(self.analyses).float()
         self.logger.info(f"Forecast tensor shape: {self.forecasts.shape}")
