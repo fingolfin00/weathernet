@@ -275,6 +275,13 @@ class CustomLightningModule(L.LightningModule):
 
         self.test_step_outputs.append({"preds": pred.detach().cpu(), "targets": y.detach().cpu()})
 
+    def on_train_epoch_start(self):
+        # Access the optimizer's learning rate
+        optimizer = self.optimizers()
+        current_lr = optimizer.param_groups[0]['lr']
+        self.log('lr', current_lr, on_step=False, on_epoch=True)
+        self.extra_logger.info(f"Epoch {self.current_epoch}: learning Rate = {current_lr}")
+
     def on_validation_epoch_end(self):
         """Process validation results, including logging a sample image"""
         if self.current_epoch % self.pic_log_interval == 0:
