@@ -205,6 +205,9 @@ class CustomLightningModule(L.LightningModule):
             x, _ = batch
             y = x
         pred = self(x)
+        # ensure contiguous
+        pred = pred.contiguous()
+        y = y.contiguous()
         loss = self.loss(pred, y)
 
         self.train_mae.update(pred, y)
@@ -225,7 +228,11 @@ class CustomLightningModule(L.LightningModule):
         else:
             x, _ = batch
             y = x
+
         pred = self(x)
+        # ensure contiguous
+        pred = pred.contiguous()
+        y = y.contiguous()
         loss = self.loss(pred, y)
 
         self.val_mae.update(pred, y)
@@ -249,6 +256,9 @@ class CustomLightningModule(L.LightningModule):
             x, _ = batch
             y = x
         pred = self(x)
+        # ensure contiguous
+        pred = pred.contiguous()
+        y = y.contiguous()
         loss = self.loss(pred, y) # Corrected: use `loss`
 
         self.test_mae.update(pred, y)
