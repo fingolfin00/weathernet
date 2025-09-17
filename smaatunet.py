@@ -83,13 +83,11 @@ class DepthwiseSeparableConv(CustomLightningModule):
 
     def forward(self, x):
         self.extra_logger.debug(f"Depthwise input: shape={x.shape}, dtype={x.dtype}, device={x.device}")
-        # Add a check for values here if you want to be extra sure no NaNs/Infs developed later
         # self.extra_logger.debug(x)
         if (torch.isnan(x).any() or torch.isinf(x).any()):
-             self.extra_logger.error("CRITICAL: Depthwise input has NaN/Inf!")
-             # You might even add a breakpoint here: import pdb; pdb.set_trace()
+             self.extra_logger.error("Depthwise input has NaN/Inf!")
         
-        x = self.depthwise(x) # <--- Error often happens here or in pointwise
+        x = self.depthwise(x)
         self.extra_logger.debug(f"Depthwise output: shape={x.shape}, dtype={x.dtype}, device={x.device}")
 
         self.extra_logger.debug(f"Pointwise input: shape={x.shape}, dtype={x.dtype}, device={x.device}")
@@ -280,4 +278,11 @@ class SmaAt_UNet(CustomLightningModule):
         return logits
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=self.learning_rate)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
+        scheduler = {
+            'scheduler': torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=4, verbose=True),
+            'monitor': 'val_loss',
+            'interval': 'epoch',
+            'frequency': 1
+        }
+        return {'optimizer': optimizer, 'lr_scheduler': scheduler}
