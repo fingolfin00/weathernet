@@ -1,7 +1,7 @@
 [global]
     work_root_path          = <work_root_path>
-    run_path                = <run_path>
-    run_name_suffix         = "italianpen"
+    combo_root_path         = <combo_root_path>
+    combo_name_suffix       = "italianpen"
     # net                     = "WeatherResNetUNet"
     net                     = "SmaAt_UNet"
     accumulate_grad_batches = 2
@@ -15,6 +15,7 @@
 [data]
     var_forecast            = "gh" # "t"    "u10"
     var_analysis            = "gh" # "T2M"  "U10M"
+    var3d                   = true
     error_limit             = 100 # 0 means no error limit
     levhpa                  = 500
     # Nord Atlantic box
@@ -31,8 +32,9 @@
     lonfin                  = 23.5
     latini                  = 49
     latfin                  = 25.5
+    full_domain             = true
     domain_size             = 128 # if set lonfin and latfin are ignored
-    interpolation_size      = 128 # if different interpolation is triggered 
+    interpolation_size      = 128 # if different interpolation is triggered
     detrend                 = false
     deseason                = false
     anomaly                 = false
@@ -57,12 +59,12 @@
 
 [train]
     # 5 years training for cmcc italian peninsula dataset
-    train_start_date        = "2020-01-01T00:00:00"
-    train_end_date          = "2025-01-01T00:00:00"
+    # train_start_date        = "2020-01-01T00:00:00"
+    # train_end_date          = "2025-01-01T00:00:00"
     # train_end_date          = "2025-05-27T00:00:00"
     # annual training for ecmwf
-    # train_start_date        = "2024-03-01T06:00:00"
-    # train_end_date          = "2025-03-01T06:00:00"
+    train_start_date        = "2024-03-01T06:00:00"
+    train_end_date          = "2025-03-01T06:00:00"
     # train_end_date          = "2024-01-07T12:00:00"
 [test]
     test_start_date         = "2025-03-02T00:00:00"
@@ -74,9 +76,11 @@
     cmap_error              = "bwr"
 
 [hyper]
-    learning_rate           = [1e-4] # 5e-4, 1e-3
+    learning_rate           = [1e-3] # 5e-4, 1e-3
     batch_size              = [64] # important, 128 not working with SmaAt_UNet
-    epochs                  = [400] # , 100, 200
+    epochs                  = [1] # , 100, 200
     loss                    = ["MSELoss"] # "L1Loss", "CrossEntropyLoss", "BCEWithLogitsLoss"
     norm_strategy           = ["BatchNorm2d"] # "LayerNorm", "InstanceNorm2d"
     supervised              = [true]
+    train_percent           = [0.9]
+    earlystopping_patience  = [30]
