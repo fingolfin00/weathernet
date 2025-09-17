@@ -35,8 +35,11 @@ def train_weathernet():
         inputs, targets, predictions = wr.test(X_np_test, y_np_test, date_range)
         # Plot
         date_range = pd.date_range(start=wr.test_start_date, end=wr.test_end_date, freq=wr.config[wr.source]["origin_frequency"]).to_pydatetime().tolist()
-        for idx, (date, i, t, o) in enumerate(zip(date_range, inputs, targets, predictions)):
-            wr.plot_figures(date, i, t, o, test_lonfc, test_latfc, test_lonan, test_latan)
+        # wr.plot_averages(inputs, targets, predictions, test_lonfc, test_latfc, test_lonan, test_latan, "°C", vmin_plt_rmse=0, vmax_plt_rmse=4, vmin_plt_bias=-3, vmax_plt_bias=3)
+        # wr.plot_averages(inputs, targets, predictions, test_lonfc, test_latfc, test_lonan, test_latan, "Pa", vmin_plt_rmse=0, vmax_plt_rmse=200, vmin_plt_bias=-60, vmax_plt_bias=60)
+        wr.plot_averages(inputs, targets, predictions, test_lonfc, test_latfc, test_lonan, test_latan, "m", vmin_plt_rmse=30, vmax_plt_rmse=80, vmin_plt_bias=-20, vmax_plt_bias=20)
+        # for idx, (date, i, t, o) in enumerate(zip(date_range, inputs, targets, predictions)):
+        #     wr.plot_figures(date, i, t, o, test_lonfc, test_latfc, test_lonan, test_latan)
 
 if __name__ == "__main__":
     train_weathernet()
