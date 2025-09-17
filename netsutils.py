@@ -1,9 +1,10 @@
 import glob, os, sys, torch, datetime, cfgrib, time, toml, importlib, colorlog, logging, subprocess, psutil
 from torch import nn
-from torch.utils.data import random_split, Dataset, DataLoader
+from torch.utils.data import random_split, Dataset, DataLoader, SubsetRandomSampler
 import torch.nn.functional as F
 import numpy as np
-from scipy.signal import detrend
+from scipy.signal import detrend, welch
+import scipy.stats as stats
 import xarray as xr
 import pandas as pd
 import netCDF4 as nc
@@ -13,9 +14,11 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 import matplotlib
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
+import seaborn as sns
 from pathlib import Path
 import urllib.request, ssl, certifi
 import lightning as L
+from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
 from lightning.pytorch.loggers import TensorBoardLogger
 # from nets import WeatherCNN, MiniResNet18, ResNetUNet, UNetConvLSTM, SpatioTemporalForecastDataset
 from smaatunet import SmaAt_UNet
@@ -36,6 +39,10 @@ from statsmodels.tsa.seasonal import seasonal_decompose
 
 matplotlib.use('Agg')  # Use a non-interactive backend
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+# Ensure deterministic behavior
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False 
 
 class Common:
     @staticmethod
@@ -108,6 +115,8 @@ class WeatherRun:
         self.loss                    = self.hyper_dict["loss"]
         self.norm_strategy           = self.hyper_dict["norm_strategy"]
         self.supervised              = self.hyper_dict["supervised"]
+        self.train_percent           = self.hyper_dict["train_percent"]
+        self.earlystopping_patience  = self.hyper_dict["earlystopping_patience"]
         self.supervised_str = "supervised" if self.supervised else "unsupervised"
         criterion = getattr(nn, self.loss)
         self.criterion = criterion()
@@ -115,7 +124,7 @@ class WeatherRun:
         # Data
         self.var_forecast            = self.config["data"]["var_forecast"]
         self.var_analysis            = self.config["data"]["var_analysis"]
-        self.interpolation_size      = self.config["data"]["interpolation_size"]
+        self.var3d                   = self.config["data"]["var3d"]
         self.error_limit             = self.config["data"]["error_limit"]
         self.levhpa                  = self.config["data"]["levhpa"]
         self.lonini, self.lonfin     = self.config["data"]["lonini"], self.config["data"]["lonfin"]
@@ -123,7 +132,18 @@ class WeatherRun:
         self.anomaly                 = self.config["data"]["anomaly"]
         self.deseason                = self.config["data"]["deseason"]
         self.detrend                 = self.config["data"]["detrend"]
-        self.domain_size             = self.config["data"]["domain_size"] # set a square domain starting from lonini and latini, lonfin and latfin are ignored
+        if "full_domain" in self.config["data"]:
+            self.full_domain         = self.config["data"]["full_domain"]
+        else:
+            self.full_domain         = None
+        if "domain_size" in self.config["data"]:
+            self.domain_size         = self.config["data"]["domain_size"] # set a square domain starting from lonini and latini, lonfin and latfin are ignored
+        else:
+            self.domain_size         = None
+        if "interpolation_size" in self.config["data"]:
+            self.interpolation_size  = self.config["data"]["interpolation_size"]
+        else:
+            self.interpolation_size  = self.domain_size
         self.forecast_delta          = self.config["data"]["forecast_delta"]
         self.source                  = self.config["data"]["source"]
         self.scalername              = self.config["data"]["scaler_name"]
@@ -135,9 +155,10 @@ class WeatherRun:
         # Test
         self.test_start_date         = datetime.datetime.fromisoformat(self.config["test"]["test_start_date"])
         self.test_end_date           = datetime.datetime.fromisoformat(self.config["test"]["test_end_date"])
-        self.cmap                    = self.config["test"]["cmap"]
-        self.cmap_anomaly            = self.config["test"]["cmap_anomaly"]
-        self.cmap_error              = self.config["test"]["cmap_error"]
+        # Visualization and plotting
+        self.cmap                    = self.config["viz"]["cmap"]
+        self.cmap_anomaly            = self.config["viz"]["cmap_anomaly"]
+        self.cmap_error              = self.config["viz"]["cmap_error"]
         # Suffices for file names
         self.suffix = "_anomaly" if self.anomaly else ""
         self.suffix += "_detrend" if self.detrend else ""
@@ -153,12 +174,27 @@ class WeatherRun:
         # Run and paths
         self.netname                 = self.config["global"]["net"]
         self.Net                     = globals()[self.netname]
-        self.run_base_name           = f"{self.var_forecast}-{self.var_analysis}{self.suffix}_{self.start_date.strftime(self.folder_date_strformat)}-{self.end_date.strftime(self.folder_date_strformat)}_{self.netname}_{self.source}_{self.scalername}_{self.loss}_{self.norm_strategy}_{self.config["global"]["run_name_suffix"]}_{self.epochs}epochs-{self.batch_size}bs-{self.learning_rate}lr"
+        self.combo_base_name         = f"{self.var_forecast}-{self.var_analysis}{self.suffix}_{self.start_date.strftime(self.folder_date_strformat)}-{self.end_date.strftime(self.folder_date_strformat)}_{self.netname}_{self.source}_{self.scalername}_{self.config["global"]["combo_name_suffix"]}"
+        self.run_base_name           = f"{self.loss}_{self.norm_strategy}_{self.epochs}epochs-{self.batch_size}bs-{self.learning_rate}lr"
         self.run_number              = run
-        self.run_name                = self.run_base_name + "_" + self.run_number
-        self.run_root_path           = self.config["global"]["run_root_path"]
-        self.run_base_path           = self.run_root_path + self.run_base_name + "/"
-        self.run_path                = self.run_base_path  + self.run_number + "/"
+        self.run_name                = self.run_number + "-" + self.run_base_name
+        self.combo_root_path         = self.config["global"]["combo_root_path"]
+        self.combo_base_path         = self.combo_root_path + self.combo_base_name + "/"
+        if Path(self.combo_base_path).is_dir():
+            combo_base_path_glob_fn        = sorted(glob.glob(self.combo_root_path + self.combo_base_name + "_*"))
+            if combo_base_path_glob_fn:
+                if dryrun:
+                    combo_suffix = int(combo_base_path_glob_fn[-1].split('_')[-1]) + 1
+                else:
+                    combo_suffix = int(combo_base_path_glob_fn[-1].split('_')[-1])
+                self.combo_base_path       = f"{self.combo_root_path}{self.combo_base_name}_{combo_suffix:05d}/"
+            else:
+                if dryrun:
+                    combo_suffix = 1
+                    self.combo_base_path   = f"{self.combo_root_path}{self.combo_base_name}_{combo_suffix:05d}/"
+                else:
+                    self.combo_base_path   = self.combo_root_path + self.combo_base_name + "/"
+        self.run_path                = self.combo_base_path + self.run_name + "/"
         self.work_root_path          = self.config["global"]["work_root_path"]
         self.download_path           = self.work_root_path + self.config["data"]["download_path"]
         self.save_data_folder        = self.work_root_path + self.config["global"]["save_data_path"]
@@ -177,13 +213,13 @@ class WeatherRun:
         self.log_format_string       = ('[%(asctime)s %(levelname)s] %(name)s: %(message)s')
         self.logger                  = logging.getLogger(__name__)
         if dryrun:
-            self.log_folder          = self.run_base_path
+            self.log_folder          = self.combo_base_path
             self.log_filename        = self.log_folder + "combo.log"
         else:
             self.log_folder          = self.run_path + "logs/"
             self.log_filename        = self.log_folder + self.run_name + ".log"
-        self.tl_root_logdir          = self.run_root_path
-        self.tl_logdir               = f"{self.tl_root_logdir}{self.run_base_name}/lightning_logs/"
+        self.tl_root_logdir          = self.combo_root_path
+        self.tl_logdir               = f"{self.combo_base_path}/lightning_logs/"
         self.accumulate_grad_batches = self.config["global"]["accumulate_grad_batches"]
         # GPU
         self.device                  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -426,6 +462,11 @@ class WeatherRun:
                     analysis_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
                     backend_kwargs={'filter_by_keys': self.grib_dict_an}
                 )
+                # ds_all_an = xr.open_dataset(
+                #     analysis_fn, engine="cfgrib", indexpath="", decode_timedelta=True
+                # )
+                # self.logger.info("Analysis variables:")
+                # self.logger.info(list(ds_all_an.data_vars))
                 an_values = ds_analysis.variables[self.var_analysis].values
                 # ds_analysis = nc.Dataset(analysis_fn)
             except Exception as e:
@@ -446,26 +487,31 @@ class WeatherRun:
                         forecast_plus1h_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
                         backend_kwargs={'filter_by_keys': self.grib_dict_fc}
                     )
-                    self.logger.warning("Average +-1h forecasts...")
-                    fc_values = np.mean( np.array([ ds_forecast_plus1h.variables[self.var_forecast].values, ds_forecast_minus1h.variables[self.var_forecast].values ]), axis=0 )
+                    # ds_all_fc = xr.open_dataset(
+                    #     forecast_minus1h_fn, engine="cfgrib", indexpath="", decode_timedelta=True
+                    # )
+                    # self.logger.info("Forecast variables:")
+                    # self.logger.info(list(ds_all_fc.data_vars))
+                    # self.logger.warning("Average +-1h forecasts...")
+                    fc_values = np.mean( np.array([ds_forecast_plus1h.variables[self.var_forecast].values, ds_forecast_minus1h.variables[self.var_forecast].values ]), axis=0 )
                 else:
                     if nearest_minus1h_forecast_flag:
                         self.logger.warning("Use -1h forecast...")
-                        ds_forecast = xr.open_dataset(
-                            forecast_minus1h_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
-                            backend_kwargs={'filter_by_keys': self.grib_dict_fc}
-                        )
+                        actual_forecast_fn = forecast_minus1h_fn
                     elif nearest_plus1h_forecast_flag:
                         self.logger.warning("Use +1h forecast...")
-                        ds_forecast = xr.open_dataset(
-                            forecast_plus1h_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
-                            backend_kwargs={'filter_by_keys': self.grib_dict_fc}
-                        )
+                        actual_forecast_fn = forecast_plus1h_fn
                     else:
-                        ds_forecast = xr.open_dataset(
-                            forecast_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
-                            backend_kwargs={'filter_by_keys': self.grib_dict_fc}
-                        )
+                        actual_forecast_fn = forecast_fn
+                    ds_forecast = xr.open_dataset(
+                        actual_forecast_fn, engine="cfgrib", indexpath="", decode_timedelta=True,
+                        backend_kwargs={'filter_by_keys': self.grib_dict_fc}
+                    )
+                    # ds_all_fc = xr.open_dataset(
+                    #     actual_forecast_fn, engine="cfgrib", indexpath="", decode_timedelta=True
+                    # )
+                    # self.logger.info("Forecast variables:")
+                    # self.logger.info(list(ds_all_fc.data_vars))
                     fc_values = ds_forecast.variables[self.var_forecast].values
                 # ds_forecast = xr.open_dataset(forecast_fn, engine="cfgrib", indexpath="")
                 # ds_forecast = cfgrib.open_datasets(forecast_fn, indexpath="/tmp/tempgrib.{short_hash}.idx")
@@ -548,8 +594,14 @@ class WeatherRun:
             except Exception as e:
                 self.logger.error(f"Exception: {e}")
                 self.logger.error(f"Latitude coord name {lat_name} not present in {analysis_coords_fn}")
-        lev_fc_full = ds_forecast_coords['isobaricInhPa'].values
-        lev_an_full = ds_analysis_coords['isobaricInhPa'].values
+        try:
+            lev_fc_full = ds_forecast_coords['isobaricInhPa'].values
+            lev_an_full = ds_analysis_coords['isobaricInhPa'].values
+        except Exception as e:
+            self.logger.warning(f"Exception: {e}")
+            self.logger.warning(f"Level coordinates not found")
+            lev_fc_full = None
+            lev_an_full = None
 
         return lon_fc_full, lon_an_full, lat_fc_full, lat_an_full, lev_fc_full, lev_an_full
 
@@ -577,22 +629,38 @@ class WeatherRun:
         lat_fc_full = var_d['lat']['forecast']
         lev_fc_full = var_d['lev']['forecast']
 
-        lonfin = self.lonfin
-        latfin = self.latfin
-        lonini_fc_idx = (np.abs(lon_fc_full - self.lonini)).argmin()
-        lonfin_fc_idx = (np.abs(lon_fc_full - lonfin)).argmin()
-        lonini_an_idx = (np.abs(lon_an_full - self.lonini)).argmin()
-        lonfin_an_idx = (np.abs(lon_an_full - lonfin)).argmin()
-        latini_fc_idx = (np.abs(lat_fc_full - self.latini)).argmin()
-        latfin_fc_idx = (np.abs(lat_fc_full - latfin)).argmin()
-        latini_an_idx = (np.abs(lat_an_full - self.latini)).argmin()
-        latfin_an_idx = (np.abs(lat_an_full - latfin)).argmin()
-        lev_analysis = (np.abs(lev_an_full - self.levhpa)).argmin()
-        lev_forecast = (np.abs(lev_fc_full - self.levhpa)).argmin()
+        if self.full_domain:
+            lonini_fc = lon_fc_full[0]
+            lonini_an = lon_an_full[0]
+            latini_fc = lat_fc_full[0]
+            latini_an = lat_an_full[0]
+            lonfin_fc = lon_fc_full[-1]
+            lonfin_an = lon_an_full[-1]
+            latfin_fc = lat_fc_full[-1]
+            latfin_an = lat_an_full[-1]
+        else:
+            lonini_fc = self.lonini
+            lonini_an = self.lonini
+            latini_fc = self.latini
+            latini_an = self.latini
+            lonfin_fc = self.lonfin
+            lonfin_an = self.lonfin
+            latfin_fc = self.latfin
+            latfin_an = self.latfin
+        lonini_fc_idx = (np.abs(lon_fc_full - lonini_fc)).argmin()
+        lonfin_fc_idx = (np.abs(lon_fc_full - lonfin_fc)).argmin()
+        lonini_an_idx = (np.abs(lon_an_full - lonini_an)).argmin()
+        lonfin_an_idx = (np.abs(lon_an_full - lonfin_an)).argmin()
+        latini_fc_idx = (np.abs(lat_fc_full - latini_fc)).argmin()
+        latfin_fc_idx = (np.abs(lat_fc_full - latfin_fc)).argmin()
+        latini_an_idx = (np.abs(lat_an_full - latini_an)).argmin()
+        latfin_an_idx = (np.abs(lat_an_full - latfin_an)).argmin()
+        lev_analysis = (np.abs(lev_an_full - self.levhpa)).argmin() if lev_an_full is not None else None
+        lev_forecast = (np.abs(lev_fc_full - self.levhpa)).argmin() if lev_fc_full is not None else None
 
         if self.domain_size:
             self.logger.info(f"Selected regular square size for analysis: {self.domain_size}x{self.domain_size}")
-            self.logger.info(f"Ignoring latfin: {latfin} and lonfin: {lonfin}")
+            self.logger.info(f"Ignoring latfin: {self.latfin} and lonfin: {self.lonfin}")
             self.logger.debug(f"Lonfin before adding size_an: {lonfin_an_idx}")
             self.logger.debug(f"Latfin before adding size_an: {latfin_an_idx}")
             lonfin_an_idx = lonini_an_idx + self.domain_size
@@ -604,16 +672,16 @@ class WeatherRun:
             lonfin_fc_idx = (np.abs(lon_fc_full - lonfin)).argmin()
             latfin_fc_idx = (np.abs(lat_fc_full - latfin)).argmin()
 
-        lonfc = lon_fc_full[lonini_fc_idx:lonfin_fc_idx]
-        latfc = lat_fc_full[latini_fc_idx:latfin_fc_idx]
-        lonan = lon_an_full[lonini_an_idx:lonfin_an_idx]
-        latan = lat_an_full[latini_an_idx:latfin_an_idx]
+        lonfc = lon_fc_full[lonini_fc_idx:lonfin_fc_idx+1]
+        latfc = lat_fc_full[latini_fc_idx:latfin_fc_idx+1]
+        lonan = lon_an_full[lonini_an_idx:lonfin_an_idx+1]
+        latan = lat_an_full[latini_an_idx:latfin_an_idx+1]
 
         first_step = next(iter(var_d))
         first_fc = var_d[first_step]['forecast']
         first_an = var_d[first_step]['analysis']
-        first_fc_sel = first_fc[lev_forecast,latini_fc_idx:latfin_fc_idx,lonini_fc_idx:lonfin_fc_idx]
-        first_an_sel = first_an[lev_forecast,latini_fc_idx:latfin_fc_idx,lonini_fc_idx:lonfin_fc_idx]
+        first_fc_sel = first_fc[lev_forecast,latini_fc_idx:latfin_fc_idx+1,lonini_fc_idx:lonfin_fc_idx+1] if lev_forecast is not None else first_fc[latini_fc_idx:latfin_fc_idx+1,lonini_fc_idx:lonfin_fc_idx+1]
+        first_an_sel = first_an[lev_analysis,latini_fc_idx:latfin_fc_idx+1,lonini_fc_idx:lonfin_fc_idx+1] if lev_analysis is not None else first_an[latini_fc_idx:latfin_fc_idx+1,lonini_fc_idx:lonfin_fc_idx+1]
         # self.logger.debug(f"Selected region")
         # self.logger.debug(f"lonfc")
         # self.logger.debug(f"{lonfc}")
@@ -632,14 +700,14 @@ class WeatherRun:
         self.logger.info(f" shape {first_step}: {first_fc.shape}")
         self.logger.info(f" lat[0], lat[{lat_fc_full.shape[0]-1}]: {lat_fc_full[0]:.2f}, {lat_fc_full[-1]:.2f}")
         self.logger.info(f" lon[0], lon[{lon_fc_full.shape[0]-1}]: {lon_fc_full[0]:.2f}, {lon_fc_full[-1]:.2f}")
-        self.logger.info(f" lev[0], lev[{lev_fc_full.shape[0]-1}]  : {lev_fc_full[0]:.2f}, {lev_fc_full[-1]:.2f}")
+        self.logger.info(f" lev[0], lev[{lev_fc_full.shape[0]-1}]  : {lev_fc_full[0]:.2f}, {lev_fc_full[-1]:.2f}") if lev_fc_full is not None else self.logger.info(" No levels")
         self.logger.info("==================")
         self.logger.info(f"Analysis ({self.var_analysis})")
         self.logger.info("------------------")
         self.logger.info(f" shape {first_step}: {first_an.shape}")
         self.logger.info(f" lat[0], lat[{lat_an_full.shape[0]-1}]: {lat_an_full[0]:.2f}, {lat_an_full[-1]:.2f}")
         self.logger.info(f" lon[0], lon[{lon_an_full.shape[0]-1}]: {lon_an_full[0]:.2f}, {lon_an_full[-1]:.2f}")
-        self.logger.info(f" lev[0], lev[{lev_an_full.shape[0]-1}]  : {lev_an_full[0]:.2f}, {lev_an_full[-1]:.2f}")
+        self.logger.info(f" lev[0], lev[{lev_an_full.shape[0]-1}]  : {lev_an_full[0]:.2f}, {lev_an_full[-1]:.2f}") if lev_an_full is not None else self.logger.info(" No levels")
 
         self.logger.info("====================")
         self.logger.info(f"Selected region")
@@ -649,20 +717,20 @@ class WeatherRun:
         self.logger.info(f" shape var         : {first_fc_sel.shape}")
         self.logger.info(f" shape lat         : {latfc.shape}")
         self.logger.info(f" shape lon         : {lonfc.shape}")
-        self.logger.info(f" shape lev         : {lev_fc_full.shape}")
+        self.logger.info(f" shape lev         : {lev_fc_full.shape}") if lev_fc_full is not None else self.logger.info(" No levels")
         self.logger.info(f" lat[{latini_fc_idx}], lat[{latfin_fc_idx}]: {latfc[0]:.2f}, {latfc[-1]:.2f}")
         self.logger.info(f" lon[{lonini_fc_idx}], lon[{lonfin_fc_idx}]: {lonfc[0]:.2f}, {lonfc[-1]:.2f}")
-        self.logger.info(f" lev[{lev_forecast}]            : {self.levhpa}")
+        self.logger.info(f" lev[{lev_forecast}]            : {self.levhpa}") if lev_forecast is not None else self.logger.info(" No levels")
         self.logger.info("====================")
         self.logger.info(f"Analysis ({self.var_analysis})")
         self.logger.info("--------------------")
         self.logger.info(f" shape var         : {first_an_sel.shape}")
         self.logger.info(f" shape lat         : {latan.shape}")
         self.logger.info(f" shape lon         : {lonan.shape}")
-        self.logger.info(f" shape lev         : {lev_an_full.shape}")
+        self.logger.info(f" shape lev         : {lev_an_full.shape}") if lev_an_full is not None else self.logger.info(" No levels")
         self.logger.info(f" lat[{latini_an_idx}], lat[{latfin_an_idx}]: {latan[0]:.2f}, {latan[-1]:.2f}")
         self.logger.info(f" lon[{lonini_an_idx}], lon[{lonfin_an_idx}]: {lonan[0]:.2f}, {lonan[-1]:.2f}")
-        self.logger.info(f" lev[{lev_analysis}]            : {self.levhpa}")
+        self.logger.info(f" lev[{lev_analysis}]            : {self.levhpa}") if lev_analysis is not None else self.logger.info(" No levels")
 
         # Lists to hold all samples
         forecast_data = []
@@ -695,16 +763,16 @@ class WeatherRun:
                         self.logger.error(f"Forecast dimension mismatch. {first_step}: {first_fc.shape}, {key}: {forecast.shape}")
 
                 if len(analysis.shape) == 3:
-                    analysis = analysis[lev_analysis,latini_an_idx:latfin_an_idx,lonini_an_idx:lonfin_an_idx]
+                    analysis = analysis[lev_analysis,latini_an_idx:latfin_an_idx+1,lonini_an_idx:lonfin_an_idx+1]
                 elif len(analysis.shape) == 2:
-                    analysis = analysis[latini_an_idx:latfin_an_idx,lonini_an_idx:lonfin_an_idx]
+                    analysis = analysis[latini_an_idx:latfin_an_idx+1,lonini_an_idx:lonfin_an_idx+1]
                 else:
                     self.logger.error(f"Unsupported dimensions {analysis.shape} for {self.var_analysis}")
 
                 if len(forecast.shape) == 3:
-                    forecast = forecast[lev_forecast,latini_fc_idx:latfin_fc_idx,lonini_fc_idx:lonfin_fc_idx]
+                    forecast = forecast[lev_forecast,latini_fc_idx:latfin_fc_idx+1,lonini_fc_idx:lonfin_fc_idx+1]
                 elif len(forecast.shape) == 2:
-                    forecast = forecast[latini_fc_idx:latfin_fc_idx,lonini_fc_idx:lonfin_fc_idx]
+                    forecast = forecast[latini_fc_idx:latfin_fc_idx+1,lonini_fc_idx:lonfin_fc_idx+1]
                 else:
                     self.logger.error(f"Unsupported dimensions {forecast.shape} for {self.var_forecast}")
 
@@ -744,10 +812,20 @@ class WeatherRun:
             self.logger.debug(f"{mean_errs[(mean_errs < -self.error_limit).astype(bool)]}")
             pruned_mean_errs = np.delete(mean_errs, condition)
             self.logger.info(f"Average an-fc error (after pruning): {pruned_mean_errs.mean()}")
-            self.logger.debug(f"Pruned timesteps where an-fc >  {self.error_limit}:")
-            self.logger.debug(f"{dates[(pruned_mean_errs > self.error_limit).astype(bool)]}")
-            self.logger.debug(f"Pruned timepsteps where an-fc < -{self.error_limit}:")
-            self.logger.debug(f"{dates[(pruned_mean_errs < -self.error_limit).astype(bool)]}")
+            self.logger.info(f"Pruned timesteps where an-fc >  {self.error_limit}: {len(full_dates[(mean_errs > self.error_limit).astype(bool)])}")
+            self.logger.debug(f"{full_dates[(mean_errs > self.error_limit).astype(bool)]}")
+            self.logger.info(f"Pruned timesteps where an-fc < -{self.error_limit}: {len(full_dates[(mean_errs < -self.error_limit).astype(bool)])}")
+            self.logger.debug(f"{full_dates[(mean_errs < -self.error_limit).astype(bool)]}")
+
+        if type == 'train':
+            if not self._check_averages():
+                self.logger.info(f"Save training period average in {average_data_path}")
+                average_fc = X_np.mean(axis=0, keepdims=True)
+                average_an = y_np.mean(axis=0, keepdims=True)
+                # self.logger.debug(f"average_fc shape: {np.shape(average_fc)}")
+                average_d = {"forecast": average_fc, "analysis": average_an}
+                with open(average_data_path, 'wb') as f:
+                    np.savez(average_data_path, average_d, allow_pickle=True)
 
         if self.deseason:
             self.logger.info(f"Deseasonalize...")
@@ -780,19 +858,19 @@ class WeatherRun:
 
         if self.anomaly:
             if type == 'train':
-                if self._check_averages():
-                    self.logger.info(f"Load training period average from {average_data_path}")
-                    average_d = self.get_data_from_fn(average_data_path)
-                    average_fc = average_d["forecast"]
-                    average_an = average_d["analysis"]
-                else:
-                    self.logger.info(f"Save training period average in {average_data_path}")
-                    average_fc = X_np.mean(axis=0, keepdims=True)
-                    average_an = y_np.mean(axis=0, keepdims=True)
-                    # self.logger.debug(f"average_fc shape: {np.shape(average_fc)}")
-                    average_d = {"forecast": average_fc, "analysis": average_an}
-                    with open(average_data_path, 'wb') as f:
-                        np.savez(average_data_path, average_d, allow_pickle=True)
+                # if self._check_averages():
+                self.logger.info(f"Load training period average from {average_data_path}")
+                average_d = self.get_data_from_fn(average_data_path)
+                average_fc = average_d["forecast"]
+                average_an = average_d["analysis"]
+                # else:
+                #     self.logger.info(f"Save training period average in {average_data_path}")
+                #     average_fc = X_np.mean(axis=0, keepdims=True)
+                #     average_an = y_np.mean(axis=0, keepdims=True)
+                #     # self.logger.debug(f"average_fc shape: {np.shape(average_fc)}")
+                #     average_d = {"forecast": average_fc, "analysis": average_an}
+                #     with open(average_data_path, 'wb') as f:
+                #         np.savez(average_data_path, average_d, allow_pickle=True)
             elif type == 'test':
                 # Load average data
                 self.logger.info(f"Load training period average from {average_data_path}")
@@ -885,18 +963,49 @@ class WeatherRun:
         if self._check_weights():
             return
         else:
+            # Set seed for reproducibility
+            seed = 42
+            L.seed_everything(seed)
             num_workers = min(os.cpu_count(), 8)  # safe default
+            self.logger.info(f"Train step workers (CPUs) in use: {num_workers}")
             # Tensorboard
             tl_logger = TensorBoardLogger(self.tl_logdir, name=self.run_base_name, version=self.run_number)
             dataset = WeatherDataset(X_np, y_np, self.Scaler, self.interpolation_size, self.logger)
-            # Split into train (90%) and test (10%)
-            num_samples = X_np.shape[0]
-            test_size = int(0.1 * num_samples)
-            train_size = num_samples - test_size
-            train_dataset, validation_dataset = random_split(dataset, [train_size, test_size])
+            # Split into train and test based on self.train_percent
+            datamodule = WeatherDataModule(dataset, train_fraction=self.train_percent, batch_size=self.batch_size, seed=seed, num_workers=num_workers)
+            # num_samples = X_np.shape[0]
+            # train_size = int(self.train_percent * num_samples)
+            # valid_size = num_samples - train_size
+            # train_dataset, validation_dataset = random_split(dataset, [train_size, valid_size])
             # Create data loaders
-            train_dataloader = DataLoader(train_dataset, batch_size=self.batch_size, num_workers=num_workers)
-            validation_dataloader = DataLoader(validation_dataset, batch_size=self.batch_size, shuffle=False, num_workers=num_workers)
+            # train_dataloader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=num_workers)
+            # validation_dataloader = DataLoader(validation_dataset, batch_size=self.batch_size, shuffle=False, num_workers=num_workers)
+            # Initialize Callbacks
+            callbacks = []
+            # Model Checkpointing
+            checkpoint_callback = ModelCheckpoint(
+                dirpath=self.weights_folder,
+                monitor="val_loss",
+                save_top_k=1,
+                mode="min",
+                filename=self._get_weights_fn()
+            )
+            callbacks.append(checkpoint_callback)
+            # Early Stopping
+            early_stop_callback = EarlyStopping(
+                monitor="val_loss",
+                patience=self.earlystopping_patience,
+                verbose=True,
+                mode="min"
+            )
+            callbacks.append(early_stop_callback)
+            # Checkpointing every N epochs
+            periodic_checkpoint_callback = ModelCheckpoint(
+                dirpath=self.weights_folder,
+                every_n_epochs=1,
+                filename="checkpoint_{epoch:02d}-{val_loss:.2f}"
+            )
+            callbacks.append(periodic_checkpoint_callback)
             # DEBUG if crazy errors show up
             # x, y = next(iter(train_dataloader))
             # x, y = x.cuda(), y.cuda()  # if using CUDA
@@ -916,36 +1025,43 @@ class WeatherRun:
             # Train
             trainer = L.Trainer(
                 max_epochs=self.epochs,
-                precision="16-mixed",
-                gradient_clip_val=1.0,           # Recommended starting value (e.g., 0.5, 1.0, 5.0)
-                gradient_clip_algorithm="norm",  # "norm" for clipping by norm, "value" for clipping by value
+                # precision="16-mixed",
+                # gradient_clip_val=1.0,           # Recommended starting value (e.g., 0.5, 1.0, 5.0)
+                # gradient_clip_algorithm="norm",  # "norm" for clipping by norm, "value" for clipping by value
                 log_every_n_steps=1,
                 logger=tl_logger,
-                accumulate_grad_batches=self.accumulate_grad_batches
+                # accumulate_grad_batches=self.accumulate_grad_batches,
+                callbacks=callbacks,
+                # deterministic=True
             )
-            trainer.fit(self.model, train_dataloader, validation_dataloader)
+            # trainer.fit(self.model, train_dataloader, validation_dataloader)
+            trainer.fit(self.model, datamodule=datamodule)
             # Save model weights
-            self.save_weights()
+            # self.save_weights()
 
     def test (self, X_np_test, y_np_test, date_range):
         num_workers = min(os.cpu_count(), 8)  # safe default
         # Tensorboard
-        tl_logger = TensorBoardLogger(self.tl_logdir, name=self.run_base_name, version=f"test_{self.run_number}")
+        # tl_logger = TensorBoardLogger(self.tl_logdir, name=self.run_base_name, version=f"test_{self.run_number}")
+        self.logger.info(f"Input  mean before test: {X_np_test.mean()}, max: {X_np_test.max()}, min: {X_np_test.min()}")
+        self.logger.info(f"Target mean before test: {y_np_test.mean()}, max: {y_np_test.max()}, min: {y_np_test.min()}")
         test_dataset = WeatherDataset(X_np_test, y_np_test, self.Scaler, self.interpolation_size, self.logger)
         # Create data loaders
         test_dataloader = DataLoader(test_dataset, batch_size=1, num_workers=num_workers, shuffle=False)
         # Load weights
-        self.logger.info(f"Load weights from file: {self._get_weights_fn()}")
-        self.model.load_state_dict(torch.load(f"{self.weights_folder}{self._get_weights_fn()}", map_location=self.device))
+        self.logger.info(f"Load weights from file: {self._get_weights_fn()}.ckpt")
+        checkpoint = torch.load(f"{self.weights_folder}{self._get_weights_fn()}.ckpt", map_location=self.device)
+        model_weights = checkpoint["state_dict"]
+        self.model.load_state_dict(model_weights)
         # Test
         trainer = L.Trainer(
             max_epochs=self.epochs,
-            precision="16-mixed",
-            gradient_clip_val=1.0,           # Recommended starting value (e.g., 0.5, 1.0, 5.0)
-            gradient_clip_algorithm="norm",  # "norm" for clipping by norm, "value" for clipping by value
+            # precision="16-mixed",
+            # gradient_clip_val=1.0,           # Recommended starting value (e.g., 0.5, 1.0, 5.0)
+            # gradient_clip_algorithm="norm",  # "norm" for clipping by norm, "value" for clipping by value
             log_every_n_steps=1,
-            logger=tl_logger,
-            accumulate_grad_batches=self.accumulate_grad_batches
+            # logger=tl_logger,
+            # accumulate_grad_batches=self.accumulate_grad_batches
         )
         output_d = trainer.test(self.model, dataloaders=test_dataloader)
         # all_outputs = self.model.test_step_outputs
@@ -961,8 +1077,9 @@ class WeatherRun:
         # Denormalize
         inputs = test_dataset.denormalize_forecast(np.array(inputs))
         targets = test_dataset.denormalize_analysis(np.array(targets))
-        predictions = test_dataset.denormalize_forecast(np.array(outputs))
-        return inputs, targets, predictions
+        predictions = test_dataset.denormalize_analysis(np.array(outputs))
+        # return inputs, targets, predictions
+        return X_np_test, y_np_test, predictions
 
     def _is_port_in_use(self, port, host='0.0.0.0'):
         """Checks if the given port is already in use."""
@@ -1014,15 +1131,12 @@ class WeatherRun:
                 self.logger.error(f"An error occurred: {e}")
 
     def _create_cartopy_axis (
-        self, fig, rows, cols, n, title, var, lon, lat, vmin_plt, vmax_plt, vcenter_plt, cmap,
+        self, ax, title, var, lon, lat, vmin_plt, vmax_plt, vcenter_plt, cmap, cbar_label,
         borders=False
     ):
-        ax = fig.add_subplot(
-            rows, cols, n,
-            projection=ccrs.PlateCarree()
-        )
         ax.set_title(title)
-        self.logger.debug(f"Ax ({rows}, {cols}, {n}) title: {title}")
+        self.logger.debug(f"Ax title: {title}")
+        # self.logger.debug(f"Ax ({rows}, {cols}, {n}) title: {title}")
         self.logger.debug(f" lat[0], lat[{lat.shape[0]-1}]: {lat[0]}, {lat[lat.shape[0]-1]}")
         self.logger.debug(f" lon[0], lon[{lon.shape[0]-1}]: {lon[0]}, {lon[lon.shape[0]-1]}")
         # self.logger.debug(f"Plot region")
@@ -1037,11 +1151,15 @@ class WeatherRun:
                            transform=ccrs.PlateCarree()
                           )
         ax.coastlines()
+        ax.set_extent([lon[0], lon[-1], lat[0], lat[-1]], crs=ccrs.PlateCarree())
         if borders:
             ax.add_feature(cfeature.BORDERS)
-        # divider1 = make_axes_locatable(ax1)
-        # cax1 = divider1.append_axes('right', size="2%", pad=0.05)
-        cb = fig.colorbar(im, ax=ax, orientation='vertical', fraction=0.047, pad=0.02)
+
+        # cbar_orientation = "horizontal" if lat.shape[0] >= lon.shape[0] else "vertical"
+        cbar_orientation = "vertical"
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("right", size="2%", pad=0.05, axes_class=plt.Axes)
+        cb = ax.figure.colorbar(im, cax=cax, orientation=cbar_orientation, label=cbar_label)
         ax.set_aspect('equal', adjustable='box')
 
         gl = ax.gridlines(
@@ -1063,20 +1181,299 @@ class WeatherRun:
         gl.xlocator = plt.MaxNLocator(5)  # or use FixedLocator
         gl.ylocator = plt.MaxNLocator(5)
 
-        return ax
-
     def interpolate_coords (self, vector):
         return np.interp(
                 np.linspace(0, len(vector) - 1, self.interpolation_size), # New x-coordinates (indices) spanning original range
                 np.arange(len(vector)),                                   # Original x-coordinates (indices)
                 vector                                                    # Original y-values (the vector itself)
             )
+
+    @staticmethod
+    def _squeeze_and_average (data):
+        """Squeeze channel dimension and calculare temporal average """
+        return data.squeeze(axis=1).mean(axis=0)
+
+    @staticmethod
+    def _calculate_rmse(y_true, y_pred):
+        return np.sqrt(np.mean((y_true - y_pred)**2, axis=0))
+
+    @staticmethod
+    def _calculate_bias(y_true, y_pred):
+        return np.mean(y_pred - y_true, axis=0)
+
+    def _bootstrap_stats (self, inputs, targets, outputs, lon, lat):
+        # Bootstrap to get distribution of RMSE and bias
+        n_bootstrap = 1000
+        rmse_bootstrap_pred, rmse_bootstrap_input = [], []
+        bias_bootstrap_pred, bias_bootstrap_input = [], []
+        rmse_bootstrap_pred_distro, rmse_bootstrap_input_distro = [], []
+        bias_bootstrap_pred_distro, bias_bootstrap_input_distro = [], []
+        for _ in range(n_bootstrap):
+            # Resample with replacement
+            indices = np.random.choice(len(targets), len(targets), replace=True)
+            y_true_sample = targets[indices]
+            y_pred_sample = outputs[indices]
+            y_input_sample = inputs[indices]
+            rmse_pred = self._calculate_rmse(y_true_sample, y_pred_sample)
+            bias_pred = self._calculate_bias(y_true_sample, y_pred_sample)
+            rmse_input = self._calculate_rmse(y_true_sample, y_input_sample)
+            bias_input = self._calculate_bias(y_true_sample, y_input_sample)
+            rmse_bootstrap_pred.append(rmse_pred)
+            bias_bootstrap_pred.append(bias_pred)
+            rmse_bootstrap_input.append(rmse_input)
+            bias_bootstrap_input.append(bias_input)
+            # average on spatial dimensions
+            rmse_bootstrap_pred_distro.append(self.spatial_stats_weighted(rmse_pred.squeeze(axis=0), lon, lat)[0])
+            bias_bootstrap_pred_distro.append(self.spatial_stats_weighted(bias_pred.squeeze(axis=0), lon, lat)[0])
+            rmse_bootstrap_input_distro.append(self.spatial_stats_weighted(rmse_input.squeeze(axis=0), lon, lat)[0])
+            bias_bootstrap_input_distro.append(self.spatial_stats_weighted(bias_input.squeeze(axis=0), lon, lat)[0])
+        # distributions (keep all dimensions)
+        rmse_bootstrap_pred = np.array(rmse_bootstrap_pred)
+        bias_bootstrap_pred = np.array(bias_bootstrap_pred)
+        rmse_bootstrap_input = np.array(rmse_bootstrap_input)
+        bias_bootstrap_input = np.array(bias_bootstrap_input)
+        # distributions (only bootstrap n)
+        rmse_bootstrap_pred_distro = np.array(rmse_bootstrap_pred_distro)
+        bias_bootstrap_pred_distro = np.array(bias_bootstrap_pred_distro)
+        rmse_bootstrap_input_distro = np.array(rmse_bootstrap_input_distro)
+        bias_bootstrap_input_distro = np.array(bias_bootstrap_input_distro)
+        # rmse_bootstrap_pred_distro = rmse_bootstrap_pred.squeeze(axis=1).mean(axis=(1,2))
+        # bias_bootstrap_pred_distro = bias_bootstrap_pred.squeeze(axis=1).mean(axis=(1,2))
+        # rmse_bootstrap_input_distro = rmse_bootstrap_input.squeeze(axis=1).mean(axis=(1,2))
+        # bias_bootstrap_input_distro = bias_bootstrap_input.squeeze(axis=1).mean(axis=(1,2))
+        # confidence intervals for scalars (average spatial dimensions)
+        percentile_intervals = [2.5, 50, 97.5]
+        rmse_pred_percentiles = np.percentile(rmse_bootstrap_pred_distro, percentile_intervals)
+        bias_pred_percentiles = np.percentile(bias_bootstrap_pred_distro, percentile_intervals)
+        rmse_input_percentiles = np.percentile(rmse_bootstrap_input_distro, percentile_intervals)
+        bias_input_percentiles = np.percentile(bias_bootstrap_input_distro, percentile_intervals)
+        # time averages
+        rmse_bootstrap_pred_avg = self._squeeze_and_average(rmse_bootstrap_pred)
+        bias_bootstrap_pred_avg = self._squeeze_and_average(bias_bootstrap_pred)
+        rmse_bootstrap_input_avg = self._squeeze_and_average(rmse_bootstrap_input)
+        bias_bootstrap_input_avg = self._squeeze_and_average(bias_bootstrap_input)
+        # max min of time average
+        rmse_bootstrap_pred_maxmin = self._maxmin_index_values(rmse_bootstrap_pred_avg)
+        bias_bootstrap_pred_maxmin = self._maxmin_index_values(bias_bootstrap_pred_avg)
+        rmse_bootstrap_input_maxmin = self._maxmin_index_values(rmse_bootstrap_input_avg)
+        bias_bootstrap_input_maxmin = self._maxmin_index_values(bias_bootstrap_input_avg)
+        self.logger.info(f"Bootstrap stats full distro: rmse in {rmse_bootstrap_input.shape}, bias in {bias_bootstrap_input.shape}, rmse out {rmse_bootstrap_pred.shape}, bias out {bias_bootstrap_pred.shape}")
+        self.logger.info(f"Bootstrap stats distro: rmse in {rmse_bootstrap_input_distro.shape}, bias in {bias_bootstrap_input_distro.shape}, rmse out {rmse_bootstrap_pred_distro.shape}, bias out {bias_bootstrap_pred_distro.shape}")
+        return {
+            'pred':  {'rmse': {'average': rmse_bootstrap_pred_avg, 'distro': rmse_bootstrap_pred_distro, 'percentiles': rmse_pred_percentiles}  | rmse_bootstrap_pred_maxmin,
+                      'bias': {'average': bias_bootstrap_pred_avg, 'distro': bias_bootstrap_pred_distro, 'percentiles': bias_pred_percentiles}  | bias_bootstrap_pred_maxmin},
+            'input': {'rmse': {'average': rmse_bootstrap_input_avg, 'distro': rmse_bootstrap_input_distro, 'percentiles': rmse_input_percentiles} | rmse_bootstrap_input_maxmin,
+                      'bias': {'average': bias_bootstrap_input_avg, 'distro': bias_bootstrap_input_distro, 'percentiles': bias_input_percentiles} | bias_bootstrap_input_maxmin}
+        }
+
+    def _regular_stats (self, inputs, targets, outputs):
+        bias_in_full = inputs-targets
+        rmse_in_regular = np.sqrt(self._squeeze_and_average(bias_in_full**2))
+        bias_in_regular = self._squeeze_and_average(bias_in_full) # time average
+        rmse_in_reg_maxmin = self._maxmin_index_values(rmse_in_regular)
+        bias_in_reg_maxmin = self._maxmin_index_values(bias_in_regular)
+        bias_out_full = outputs-targets
+        rmse_out_regular = np.sqrt(self._squeeze_and_average(bias_out_full**2))
+        bias_out_regular = self._squeeze_and_average(bias_out_full) # time average
+        rmse_out_reg_maxmin = self._maxmin_index_values(rmse_out_regular)
+        bias_out_reg_maxmin = self._maxmin_index_values(bias_out_regular)
+        self.logger.info(f"Regular stats shapes: rmse in {rmse_in_regular.shape}, bias in {bias_in_regular.shape}, rmse out {rmse_out_regular.shape}, bias out {bias_out_regular.shape}")
+        return {
+            'pred':  {'rmse': {'average': rmse_out_regular} | rmse_out_reg_maxmin,
+                      'bias': {'average': bias_out_regular} | bias_out_reg_maxmin},
+            'input': {'rmse': {'average': rmse_in_regular} | rmse_in_reg_maxmin,
+                      'bias': {'average': bias_in_regular} | bias_in_reg_maxmin}
+        }
+
+    @staticmethod
+    def spatial_stats_weighted(data, lon, lat, mask=None):
+        """
+        Calculate area-weighted spatial mean and std for geophysical data.
+        Parameters:
+        - data: 2D array of values (lat, lon)
+        - lon: 1D array of longitude values
+        - lat: 1D array of latitude values  
+        - mask: optional boolean mask for valid data points
+        """
+        # Create 2D coordinate grids
+        LON, LAT = np.meshgrid(lon, lat)
+        # Calculate area weights (cosine of latitude)
+        weights = np.cos(np.radians(LAT)) # normalized
+        # Apply mask if provided
+        if mask is not None:
+            data = np.ma.masked_array(data, mask=~mask)
+            weights = np.ma.masked_array(weights, mask=~mask)
+        # Calculate weighted mean, np.average normalize weights to 1 internally
+        weighted_mean = np.average(data, weights=weights)
+        # Calculate weighted standard deviation
+        variance = np.average((data - weighted_mean)**2, weights=weights)
+        weighted_std = np.sqrt(variance)
+        return weighted_mean, weighted_std
+
+    def power_spectrum(self, data):
+        """Calculate radially averaged 2D FFT power spectrum"""
+        self.logger.info(f"Calculating power spectrum on data of shape {data.shape}")
+        if len(data.shape) > 2:
+            self.logger.warning(f"Data shape greater than 2, attempt squeezing...")
+            data = data.squeeze()
+        ny, nx = data.shape
+        kfreqx = np.fft.fftfreq(nx) * nx
+        kfreqy = np.fft.fftfreq(ny) * ny
+        kx, ky = np.meshgrid(kfreqx, kfreqy)
+        knrm = np.sqrt(kx**2 + ky**2).flatten()
+        self.logger.debug(f"knrm: {knrm.shape}")
+        fourier_amplitudes = np.abs(np.fft.fftn(data))**2
+        fourier_amplitudes = fourier_amplitudes.flatten()
+        self.logger.debug(f"fourier_amplitudes: {fourier_amplitudes.shape}")
+        # Bin edges up to Nyquist (half the min dimension)
+        kmax = min(nx, ny) // 2
+        kbins = np.arange(0.5, kmax + 1, 1.)
+        self.logger.debug(f"kbins: {kbins.shape}")
+        kvals = 0.5 * (kbins[1:] + kbins[:-1])
+        Abins, _, _ = stats.binned_statistic(knrm, fourier_amplitudes,
+                                     statistic="mean", bins=kbins)
+        Abins *= np.pi * (kbins[1:]**2 - kbins[:-1]**2)
+        return kvals, Abins
+
+    def plot_spatial_ps (self, inputs):
+        kvals, Abins = self.power_spectrum(inputs[:,0,:,:].mean(axis=0))
+        plt.loglog(kvals, Abins)
+        plt.xlabel('k')
+        plt.ylabel('P(k)')
+        plt.savefig(self.fig_folder + f"power_spectrum_{self.test_start_date.strftime(self.plot_date_strformat)}-{self.test_end_date.strftime(self.plot_date_strformat)}.png")
+
+    @staticmethod
+    def _maxmin_index_values (data):
+        max_arg, min_arg = data.argmax(), data.argmin()
+        max_coords = np.unravel_index(max_arg, data.shape)
+        max_coords = tuple(coord.item() for coord in max_coords)
+        min_coords = np.unravel_index(min_arg, data.shape)
+        min_coords = tuple(coord.item() for coord in min_coords)
+        return {
+            'max': {'coords': max_coords, 'value': data.max()},
+            'min': {'coords': min_coords, 'value': data.min()}
+        }
+
+    def _print_mean_std_maxmin_str (self, data, technique, data_type, metric, sigdig=2):        
+        self.logger.info(f"{(metric.upper())} ({technique:>10}) {data_type:>5} mean: {data[data_type][metric]['average'].mean():.{sigdig}f} +- {data[data_type][metric]['average'].std():.{sigdig}f}, max: {data[data_type][metric]['max']['coords']}->{data[data_type][metric]['max']['value']:.{sigdig}f}, min: {data[data_type][metric]['min']['coords']}->{data[data_type][metric]['min']['value']:.{sigdig}f}")
+
+    def print_stats (self, inputs, targets, outputs, bootstrap, regular, lonfc, latfc, lonan, latan, sigdig=2):
+        self.logger.info(f"----------------------------------------")
+        self.logger.info(f"Statistics (time-average):")
+        self.logger.info(f"Input  mean: {inputs.mean():.{sigdig}f} +- {inputs.std():.{sigdig}f}, max: {inputs.mean(axis=0).max():.{sigdig}f}, min: {inputs.mean(axis=0).min():.{sigdig}f}")
+        self.logger.info(f"Target mean: {targets.mean():.{sigdig}f} +- {targets.std():.{sigdig}f}, max: {targets.mean(axis=0).max():.{sigdig}f}, min: {targets.mean(axis=0).min():.{sigdig}f}")
+        self.logger.info(f"Output mean: {outputs.mean():.{sigdig}f} +- {outputs.std():.{sigdig}f}, max: {outputs.mean(axis=0).max():.{sigdig}f}, min: {outputs.mean(axis=0).min():.{sigdig}f}")
+        self._print_mean_std_maxmin_str(bootstrap, 'bootstrap', 'input', 'rmse', sigdig=sigdig)
+        self._print_mean_std_maxmin_str(regular, 'regular', 'input', 'rmse', sigdig=sigdig)
+        self._print_mean_std_maxmin_str(bootstrap, 'bootstrap', 'input', 'bias', sigdig=sigdig)
+        self._print_mean_std_maxmin_str(regular, 'regular', 'input', 'bias', sigdig=sigdig)
+        self._print_mean_std_maxmin_str(bootstrap, 'bootstrap', 'pred', 'rmse', sigdig=sigdig)
+        self._print_mean_std_maxmin_str(regular, 'regular', 'pred', 'rmse', sigdig=sigdig)
+        self._print_mean_std_maxmin_str(bootstrap, 'bootstrap', 'pred', 'bias', sigdig=sigdig)
+        self._print_mean_std_maxmin_str(regular, 'regular', 'pred', 'bias', sigdig=sigdig)
+
+        inputs_wmean, inputs_wstd = self.spatial_stats_weighted(self._squeeze_and_average(inputs), lonfc, latfc)
+        targets_wmean, targets_wstd = self.spatial_stats_weighted(self._squeeze_and_average(targets), lonan, latan)
+        outputs_wmean, outputs_wstd = self.spatial_stats_weighted(self._squeeze_and_average(outputs), lonfc, latfc)
+        inputs_bs_rmse_wmean, inputs_bs_rmse_wstd = self.spatial_stats_weighted(bootstrap['input']['rmse']['average'], lonfc, latfc)
+        inputs_bs_bias_wmean, inputs_bs_bias_wstd = self.spatial_stats_weighted(bootstrap['input']['bias']['average'], lonfc, latfc)
+        outputs_bs_rmse_wmean, outputs_bs_rmse_wstd = self.spatial_stats_weighted(bootstrap['pred']['rmse']['average'], lonfc, latfc)
+        outputs_bs_bias_wmean, outputs_bs_bias_wstd = self.spatial_stats_weighted(bootstrap['pred']['bias']['average'], lonfc, latfc)
+        inputs_reg_rmse_wmean, inputs_reg_rmse_wstd = self.spatial_stats_weighted(regular['input']['rmse']['average'], lonfc, latfc)
+        inputs_reg_bias_wmean, inputs_reg_bias_wstd = self.spatial_stats_weighted(regular['input']['bias']['average'], lonfc, latfc)
+        outputs_reg_rmse_wmean, outputs_reg_rmse_wstd = self.spatial_stats_weighted(regular['pred']['rmse']['average'], lonfc, latfc)
+        outputs_reg_bias_wmean, outputs_reg_bias_wstd = self.spatial_stats_weighted(regular['pred']['bias']['average'], lonfc, latfc)
+        self.logger.info(f"----------------------------------------")
+        self.logger.info(f"Area-weighted statistics (time-average):")
+        self.logger.info(f"Input  weighted mean: {inputs_wmean:.{sigdig}f} +- {inputs_wstd:.{sigdig}f}")
+        self.logger.info(f"Target weighted mean: {targets_wmean:.{sigdig}f} +- {targets_wstd:.{sigdig}f}")
+        self.logger.info(f"Output weighted mean: {outputs_wmean:.{sigdig}f} +- {outputs_wstd:.{sigdig}f}")
+        self.logger.info(f"RMSE ( bootstrap) input weighted mean: {inputs_bs_rmse_wmean:.{sigdig}f} +- {inputs_bs_rmse_wstd:.{sigdig}f}")
+        self.logger.info(f"RMSE (   regular) input weighted mean: {inputs_reg_rmse_wmean:.{sigdig}f} +- {inputs_reg_rmse_wstd:.{sigdig}f}")
+        self.logger.info(f"Bias ( bootstrap) input weighted mean: {inputs_bs_bias_wmean:.{sigdig}f} +- {inputs_bs_bias_wstd:.{sigdig}f}")
+        self.logger.info(f"Bias (   regular) input weighted mean: {inputs_reg_bias_wmean:.{sigdig}f} +- {inputs_reg_bias_wstd:.{sigdig}f}")
+        self.logger.info(f"RMSE ( bootstrap)  pred weighted mean: {outputs_bs_rmse_wmean:.{sigdig}f} +- {outputs_bs_rmse_wstd:.{sigdig}f}")
+        self.logger.info(f"RMSE (   regular)  pred weighted mean: {outputs_reg_rmse_wmean:.{sigdig}f} +- {outputs_reg_rmse_wstd:.{sigdig}f}")
+        self.logger.info(f"Bias ( bootstrap)  pred weighted mean: {outputs_bs_bias_wmean:.{sigdig}f} +- {outputs_bs_bias_wstd:.{sigdig}f}")
+        self.logger.info(f"Bias (   regular)  pred weighted mean: {outputs_reg_bias_wmean:.{sigdig}f} +- {outputs_reg_bias_wstd:.{sigdig}f}")
+        self.logger.info(f"----------------------------------------")
+
+    def plot_averages (self, inputs, targets, outputs, lonfc, latfc, lonan, latan, cbar_label, vmin_plt_rmse=None, vmax_plt_rmse=None, vmin_plt_bias=None, vmax_plt_bias=None):
+        self.logger.info(f"Data shapes: input {inputs.shape}, target {targets.shape}, prediction {outputs.shape}")
+        bootstrap = self._bootstrap_stats(inputs, targets, outputs, lonfc, latfc)
+        regular = self._regular_stats(inputs, targets, outputs)
+        self.print_stats(inputs, targets, outputs, bootstrap, regular, lonfc, latfc, lonan, latan)
+
+        plt_stats = regular
+        rmse_in_avg_plot = plt_stats['input']['rmse']['average']
+        rmse_out_avg_plot = plt_stats['pred']['rmse']['average']
+        bias_in_avg_plot = plt_stats['input']['bias']['average']
+        bias_out_avg_plot = plt_stats['pred']['bias']['average']
+
+        nrows, ncols = 2, 2
+        H, W = inputs.shape[-2], inputs.shape[-1]
+        ax_height = 5  # H inches per subplot
+        ax_width = ax_height * W / H
+        if ax_width < 7:
+            ax_width = 7
+            ax_height = ax_width * H / W
+        fig, axs = plt.subplots(
+            nrows, ncols,
+            subplot_kw={'projection': ccrs.PlateCarree()},
+            figsize=(ncols * ax_width, nrows * ax_height)
+        )
+        axs = axs.ravel()
+        # vmin_plt_rmse = np.min([np.min(rmse_in_avg_plot), np.min(rmse_out_avg_plot)])
+        # vmax_plt_rmse = np.max([np.max(rmse_in_avg_plot), np.max(rmse_out_avg_plot)])
+        if vmin_plt_rmse == None:
+            vmin_plt_rmse = rmse_in_avg_plot.min()
+        if vmax_plt_rmse == None:
+            vmax_plt_rmse = rmse_in_avg_plot.max()
+        vcenter_plt_rmse = 0 if vmin_plt_rmse < 0 and vmax_plt_rmse > 0 else vmin_plt_rmse+(vmax_plt_rmse-vmin_plt_rmse)/2
+        # vmin_plt_bias = np.min([np.min(bias_in_avg_plot), np.min(bias_out_avg_plot)])
+        # vmax_plt_bias = np.max([np.max(bias_in_avg_plot), np.max(bias_out_avg_plot)])
+        if vmin_plt_bias == None:
+            vmin_plt_bias = np.min(bias_in_avg_plot)
+        if vmax_plt_bias == None:
+            vmax_plt_bias = np.max(bias_in_avg_plot)
+        vcenter_plt_bias = 0 if vmin_plt_bias < 0 and vmax_plt_bias > 0 else vmin_plt_bias+(vmax_plt_bias-vmin_plt_bias)/2
+
+        title_details = f" {self.var_forecast}a" if self.anomaly else f" {self.var_forecast}"
+        title_details += " (deseasonalized)" if self.deseason else ""
+        title_details += f" at {self.levhpa} hPa" if self.var3d else ""
+        title_details += f" ({self.test_start_date.strftime(self.plot_date_strformat)} - {self.test_end_date.strftime(self.plot_date_strformat)})"
+
+        # RMSE
+        self._create_cartopy_axis(axs[0], 'RMSE' + title_details, rmse_in_avg_plot, lonfc, latfc, vmin_plt_rmse, vmax_plt_rmse, vcenter_plt_rmse, self.cmap, cbar_label, borders=True)
+        self._create_cartopy_axis(axs[1], 'RMSE corrected' + title_details, rmse_out_avg_plot, lonfc, latfc, vmin_plt_rmse, vmax_plt_rmse, vcenter_plt_rmse, self.cmap, cbar_label, borders=True)
+        # bias
+        self._create_cartopy_axis(axs[2], 'bias' + title_details, bias_in_avg_plot, lonfc, latfc, vmin_plt_bias, vmax_plt_bias, vcenter_plt_bias, self.cmap_error, cbar_label, borders=True)
+        self._create_cartopy_axis(axs[3], 'bias corrected' + title_details, bias_out_avg_plot, lonfc, latfc, vmin_plt_bias, vmax_plt_bias, vcenter_plt_bias, self.cmap_error, cbar_label, borders=True)
+
+        plt.tight_layout()
+        plt.savefig(self.fig_folder + f"rmse-bias_{self.test_start_date.strftime(self.plot_date_strformat)}-{self.test_end_date.strftime(self.plot_date_strformat)}.png")
+        plt.close()
+
+        results_df = pd.DataFrame({'input': bootstrap['input']['rmse']['percentiles'], 'pred': bootstrap['pred']['rmse']['percentiles']}, index=["2.5% RMSE", "Median RMSE", "97.5% RMSE"]).T
+        results_df = results_df.sort_values(by="Median RMSE")
+        self.logger.info(f"{self.var_forecast} bootstrap-based RMSE uncertainty (95% CI):")
+        print(results_df)
+        plt.figure(figsize=(12, 6))
+        sns.boxplot(data=pd.DataFrame({'input': bootstrap['input']['rmse']['distro'], 'pred': bootstrap['pred']['rmse']['distro']}), orient="h")
+        plt.title("Bootstrap RMSE Distributions")
+        plt.xlabel("RMSE")
+        plt.xlim(vmin_plt_rmse, vmax_plt_rmse)
+        plt.tight_layout()
+        plt.grid(True, axis='x')
+        plt.savefig(self.fig_folder + f"boxplot_{self.test_start_date.strftime(self.plot_date_strformat)}-{self.test_end_date.strftime(self.plot_date_strformat)}.png")
+        plt.close()
+
     def plot_figures (self, date, inputs, targets, outputs, lonfc, latfc, lonan, latan):
         average_data_path = self._get_average_fn()
         average_d = self.get_data_from_fn(average_data_path)
         average_fc = average_d["forecast"]
         average_an = average_d["analysis"]
-        if self.domain_size != self.interpolation_size:
+        if self.domain_size != self.interpolation_size and not self.full_domain:
             lonfc = self.interpolate_coords(lonfc)
             latfc = self.interpolate_coords(latfc)
             lonan = self.interpolate_coords(lonan)
@@ -1141,7 +1538,8 @@ class WeatherRun:
             cmap = self.cmap
         title_details = f" {self.var_forecast}a" if self.anomaly else f" {self.var_forecast}"
         title_details += " (deseasonalized)" if self.deseason else ""
-        title_details += f" at {self.levhpa} hPa (" + date.strftime(self.plot_date_strformat) + ")"
+        title_details += f" at {self.levhpa} hPa" if self.var3d else ""
+        title_details += f" (" + date.strftime(self.plot_date_strformat) + ")"
 
         # Forecast
         ax1 = self._create_cartopy_axis (fig, 3, 2, 3, 'Forecast' + title_details, plot_sample_fc, lonfc, latfc, vmin_plt, vmax_plt, vcenter_plt, cmap)
@@ -1150,7 +1548,9 @@ class WeatherRun:
         # Prediction
         ax3 = self._create_cartopy_axis (fig, 3, 2, 5, 'Prediction' + title_details, plot_pred, lonfc, latfc, vmin_plt, vmax_plt, vcenter_plt, cmap)
         # Average of analysis
-        title_avg = f"Avg analysis {self.var_forecast} at {self.levhpa} hPa ({self.start_date.strftime(self.plot_date_strformat)} - {self.end_date.strftime(self.plot_date_strformat)})"
+        title_avg = f"Avg analysis {self.var_forecast}"
+        title_avg += f" at {self.levhpa} hPa" if self.var3d else ""
+        title_avg += f" ({self.start_date.strftime(self.plot_date_strformat)} - {self.end_date.strftime(self.plot_date_strformat)})"
         if self.anomaly:
             vmin_plt = np.min(plot_average_an)
             vmax_plt = np.max(plot_average_an)
@@ -1202,30 +1602,31 @@ class WeatherDataset(Dataset):
         self.forecasts = forecasts
         self.analyses = analyses
         # Interpolate if provided size is different from original size
-        if size != self.forecasts.shape[-2] or size != self.forecasts.shape[-1]:
-            # Convert to PyTorch tensors (shape: [num_samples, 1, H, W])
-            self.forecasts = torch.from_numpy(self.forecasts).float()
-            self.logger.info(f"Interpolate forecasts to {size}x{size}") 
-            self.forecasts = F.interpolate(self.forecasts, size=(size, size), mode='bilinear', align_corners=False)
-            self.forecasts = self.forecasts.numpy()
-        if size != self.analyses.shape[-2] or size != self.analyses.shape[-1]:
-            # Convert to PyTorch tensors (shape: [num_samples, 1, H, W])
-            self.analyses = torch.from_numpy(self.analyses).float()
-            self.logger.info(f"Interpolate analyses to {size}x{size}")
-            self.analyses = F.interpolate(self.analyses, size=(size, size), mode='bilinear', align_corners=False)
-            self.analyses = self.analyses.numpy()
-        # Resize y to match model output
-        if self.analyses.shape[-2] != self.forecasts.shape[-2] or self.analyses.shape[-1] != self.forecasts.shape[-1]:
-            # Convert to PyTorch tensors (shape: [num_samples, 1, H, W])
-            self.forecasts = torch.from_numpy(self.forecasts).float()
-            self.analyses = torch.from_numpy(self.analyses).float()
-            self.forecasts = F.interpolate(
-                self.forecasts, 
-                size=(self.analyses.shape[-2], self.analyses.shape[-1]), 
-                mode='bilinear'  # or 'bicubic' for higher precision
-            )
-            self.forecasts = self.forecasts.numpy()
-            self.analyses = self.analyses.numpy()
+        if size:
+            if size != self.forecasts.shape[-2] or size != self.forecasts.shape[-1]:
+                # Convert to PyTorch tensors (shape: [num_samples, 1, H, W])
+                self.forecasts = torch.from_numpy(self.forecasts).float()
+                self.logger.info(f"Interpolate forecasts to {size}x{size}") 
+                self.forecasts = F.interpolate(self.forecasts, size=(size, size), mode='bilinear', align_corners=False)
+                self.forecasts = self.forecasts.numpy()
+            if size != self.analyses.shape[-2] or size != self.analyses.shape[-1]:
+                # Convert to PyTorch tensors (shape: [num_samples, 1, H, W])
+                self.analyses = torch.from_numpy(self.analyses).float()
+                self.logger.info(f"Interpolate analyses to {size}x{size}")
+                self.analyses = F.interpolate(self.analyses, size=(size, size), mode='bilinear', align_corners=False)
+                self.analyses = self.analyses.numpy()
+            # Resize y to match model output
+            if self.analyses.shape[-2] != self.forecasts.shape[-2] or self.analyses.shape[-1] != self.forecasts.shape[-1]:
+                # Convert to PyTorch tensors (shape: [num_samples, 1, H, W])
+                self.forecasts = torch.from_numpy(self.forecasts).float()
+                self.analyses = torch.from_numpy(self.analyses).float()
+                self.forecasts = F.interpolate(
+                    self.forecasts, 
+                    size=(self.analyses.shape[-2], self.analyses.shape[-1]), 
+                    mode='bilinear'  # or 'bicubic' for higher precision
+                )
+                self.forecasts = self.forecasts.numpy()
+                self.analyses = self.analyses.numpy()
         # Normalize data
         self.forecasts, self.fc_scaler = self._normalize(self.forecasts)
         self.analyses, self.an_scaler = self._normalize(self.analyses)
@@ -1240,7 +1641,7 @@ class WeatherDataset(Dataset):
         self.logger.debug(f"Data before normalization: {np.shape(data)}")
         data = np.squeeze(data, axis=1)
         # Reshape along samples N
-        data = data.reshape(H, -1)
+        data = data.reshape(N, -1)
         self.logger.debug(f"Reshaped data before normalization: {np.shape(data)}")
         scaler = self.Scaler().fit(data)
         scaled_data = scaler.transform(data)
@@ -1254,7 +1655,7 @@ class WeatherDataset(Dataset):
         N, C, H, W = np.shape(scaled_data)
         scaled_data = np.squeeze(scaled_data, axis=1)
         # Reshape along samples N
-        scaled_data = scaled_data.reshape(H, -1)
+        scaled_data = scaled_data.reshape(N, -1)
         self.logger.debug(f"Reshaped data before denormalization: {np.shape(scaled_data)}")
         data = scaler.inverse_transform(scaled_data)
         data = data.reshape(N, C, H, W)
@@ -1272,3 +1673,54 @@ class WeatherDataset(Dataset):
     def __getitem__(self, idx):
         return self.forecasts[idx], self.analyses[idx]
 
+
+class WeatherDataModule(L.LightningDataModule):
+    def __init__(self, dataset, train_fraction=0.9, batch_size=32, seed=42, num_workers=0):
+        super().__init__()
+        self.dataset = dataset
+        self.train_fraction = train_fraction
+        self.batch_size = batch_size
+        self.seed = seed
+        self.num_workers = num_workers
+
+    def setup(self, stage=None):
+        # initial split
+        self._resplit()
+
+    def _resplit(self):
+        torch.manual_seed(self.seed)
+
+        num_samples = len(self.dataset)
+        indices = torch.randperm(num_samples)
+        subset_size = int(num_samples * self.train_fraction)
+
+        train_indices = indices[:subset_size]
+        valid_indices = indices[subset_size:]
+
+        train_sampler = SubsetRandomSampler(train_indices)
+        valid_sampler = SubsetRandomSampler(valid_indices)
+
+        self._train_dl = DataLoader(
+            self.dataset, 
+            batch_size=self.batch_size, 
+            sampler=train_sampler,  
+            num_workers=self.num_workers,
+            pin_memory=True,
+        )
+        self._val_dl = DataLoader(
+            self.dataset, 
+            batch_size=self.batch_size, 
+            sampler=valid_sampler,  
+            num_workers=self.num_workers,
+            pin_memory=True,
+        )
+
+    def train_dataloader(self):
+        return self._train_dl
+
+    def val_dataloader(self):
+        return self._val_dl
+
+    def on_train_epoch_start(self):
+        # re-split at every epoch
+        self._resplit()
