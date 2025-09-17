@@ -181,8 +181,10 @@ class CustomLightningModule(L.LightningModule):
         channel_idx = 0 
 
         # Extract the single image slice (H, W)
-        pred_img_slice = pred_tensor[sample_idx, channel_idx, :, :]
-        target_img_slice = target_tensor[sample_idx, channel_idx, :, :]
+        # pred_img_slice = pred_tensor[sample_idx, channel_idx, :, :]
+        # target_img_slice = target_tensor[sample_idx, channel_idx, :, :]
+        pred_img_slice = pred_tensor.mean(axis=(0,1))
+        target_img_slice = target_tensor.mean(axis=(0,1))
 
         # Determine vmin/vmax for consistent color mapping across prediction and target
         # This is important for comparing them visually
