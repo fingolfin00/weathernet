@@ -91,6 +91,35 @@ class CustomLightningModule(L.LightningModule):
         self.last_val_pred = None
         self.last_val_target = None
 
+    @staticmethod
+    def center_crop_to(x, target_h, target_w):
+        _, _, h, w = x.shape
+        off_y = max((h - target_h) // 2, 0)
+        off_x = max((w - target_w) // 2, 0)
+        return x[:, :, off_y:off_y + target_h, off_x:off_x + target_w]
+
+    def match_spatial(self, x, H, W):
+        """Match tensor x to ref's HxW by center-cropping or padding (replicate) without interpolation."""
+        _, _, h, w = x.shape
+        dy, dx = H - h, W - w
+        if dy == 0 and dx == 0:
+            return x
+
+        # If x is larger -> crop; if smaller -> pad (replicate) to avoid introducing zeros
+        if dy < 0 or dx < 0:
+            x = self.center_crop_to(x, min(h, H), min(w, W))
+            _, _, h, w = x.shape
+            dy, dx = H - h, W - w
+
+        # Now only non-negative pads remain
+        if dy != 0 or dx != 0:
+            pad_left   = dx // 2
+            pad_right  = dx - pad_left
+            pad_top    = dy // 2
+            pad_bottom = dy - pad_top
+            x = F.pad(x, (pad_left, pad_right, pad_top, pad_bottom), mode="replicate")
+        return x
+
     def _squeeze_and_add_log_img(self, img_tensor, name_tag, logger_instance, colormap=None, vmin=None, vmax=None):
         """
         Logs a single 2D image to the logger, with optional colormap.
