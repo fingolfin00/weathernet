@@ -1,11 +1,9 @@
 Things to do
 
-1. Log plots in lightning tensorboard. At each validation step we plot the prediction error # DONE
-2. Logging with colorlog is fine, but internal lightning logs has different format, look if it is possible to align them together # WON'T DO
-3. Would be nice to launch tensorboard from the script, currentyl it doesn't work
-4. Implement a checkpoint system to resume where last artifacts was created, at least in terms of weight # ALMOST DONE
-5. Maybe restructure using xarray?
-6. Add intermediate plotting for data preparation and loading
-7. Support different full domain size so we can use early forecast/analysis couples. Need to interpolate probably # NOT A GOOD IDEA
-8. Normalization is very bad currently moving from CPU to GPU to CPU to GPU too many times. We should go fully pytorch reimplementing the scikit-learn scalers
-9. In combo run add the possibility to tun more models with the same setup
+1. Reimplement combo mode: run folder structure is not currently good, run root folder needs to be renamed and subfolders with combo parameters must be created
+2. Maybe restructure using xarray?
+3. Add intermediate plotting for data preparation and loading
+4. Normalization is very bad currently moving from CPU to GPU to CPU to GPU too many times. We should go fully pytorch reimplementing the scikit-learn scalers
+5. In combo run add the possibility to run more models with the same setup
+6. Add dropout? Add learning rate scheduler?
+7. Support data parallelism with Lightning/Fabric MPI
