@@ -1310,6 +1310,214 @@ class WeatherRun:
         weighted_std = np.sqrt(variance)
         return weighted_mean, weighted_std
 
+    def _mean_spacing_m(lon, lat):
+        """
+        Compute mean grid spacing dx (east-west) and dy (north-south) in meters
+        from 1D lon, lat vectors in degrees.
+        Assumes lon,lat are 1D and correspond to array axes: lon -> x, lat -> y.
+        """
+        R_earth_m = 6371000.0  # Earth radius in meters
+        # ensure arrays
+        lon = np.asarray(lon)
+        lat = np.asarray(lat)
+        # degree -> rad
+        deg2rad = np.pi/180.0
+    
+        # dy: mean lat spacing (use mean absolute diff)
+        dlat_deg = np.mean(np.abs(np.diff(lat)))
+        dy = R_earth_m * (dlat_deg * deg2rad)       # meters per lat-step
+    
+        # dx: depends on latitude (use cos(mean_lat))
+        mean_lat_rad = np.deg2rad(np.mean(lat))
+        dlon_deg = np.mean(np.abs(np.diff(lon)))
+        dx = R_earth_m * np.cos(mean_lat_rad) * (dlon_deg * deg2rad)  # meters per lon-step
+    
+        return dx, dy
+    
+    def power_spectrum_physical(data, lon, lat, return_wavelength_km=True):
+        """
+        Radially averaged 2D PSD with k converted to physical units.
+        - data: 2D array [ny, nx]
+        - lon: 1D lon vector in degrees length nx
+        - lat: 1D lat vector in degrees length ny
+        Returns:
+          - k_vals_cpkm: radial wavenumbers in cycles per km (1/km)
+          - Pk: PSD (units: data**2; see notes)
+          - lambda_km (optional): corresponding wavelength in km (1 / k)
+        """
+        if data.ndim > 2:
+            data = data.squeeze()
+        ny, nx = data.shape
+        assert nx == len(lon) and ny == len(lat), "lon/lat lengths must match data shape"
+    
+        # physical spacings (meters)
+        dx, dy = _mean_spacing_m(lon, lat)   # dx: east-west per grid cell, dy: north-south per grid cell
+    
+        # fftfreq with physical spacing: returns cycles per meter
+        kx = np.fft.fftfreq(nx, d=dx)  # cycles / meter along x
+        ky = np.fft.fftfreq(ny, d=dy)  # cycles / meter along y
+        kxg, kyg = np.meshgrid(kx, ky)
+        kgrid = np.sqrt(kxg**2 + kyg**2).ravel()  # cycles / meter
+    
+        # Fourier power (normalized by number of points to give PSD comparable across sizes)
+        F = np.fft.fft2(data)
+        power = (np.abs(F)**2) / (nx * ny)**2
+        power = power.ravel()
+    
+        # radial binning up to Nyquist; convert Nyquist to cycles/m -> then to cycles/km for bins
+        # compute maximum k index (in cycles/m) from sampling: nyquist_x = 1/(2*dx), nyquist_y = 1/(2*dy)
+        kmax_m = min(1.0/(2*dx), 1.0/(2*dy))
+        # define bins in cycles per meter; choose bin width = 1/(domain length) ~ 1/(N*dx)
+        # but simpler: create bins as multiples of fundamental radial step:
+        dk_m = 1.0 / (max(nx*dx, ny*dy))   # fundamental radial resolution in cycles/m
+        kbins_m = np.arange(dk_m/2, kmax_m + dk_m, dk_m)
+    
+        # bin and compute mean PSD in each annulus
+        Abins, _, _ = stats.binned_statistic(kgrid, power, statistic="mean", bins=kbins_m)
+        kvals_m = 0.5 * (kbins_m[1:] + kbins_m[:-1])  # cycles / meter (for each bin)
+    
+        # convert to cycles / km and wavelengths in km
+        kvals_cpkm = kvals_m * 1000.0  # cycles per km
+        with np.errstate(divide='ignore', invalid='ignore'):
+            lambda_km = 1.0 / (kvals_cpkm)   # km per cycle (wavelength)
+            # where k=0 will produce inf -> leave as inf or mask later
+    
+        if return_wavelength_km:
+            return kvals_cpkm, Abins, lambda_km
+        else:
+            return kvals_cpkm, Abins
+    
+    def spectral_scale_metrics(k_cpkm, P, return_all=True):
+        """
+        Compute metrics describing prevalent spatial scale(s) from a radially-averaged PSD.
+        Inputs:
+          - k_cpkm: 1D array of radial wavenumbers (cycles per km), shape (M,)
+                    NOTE: k=0 bin (if present) should be included but handled (it yields infinite wavelength).
+          - P:      1D array of PSD values for each bin (same length M). Can be raw or normalized.
+                    If P are mean powers per bin, we'll treat bin widths explicitly.
+        Returns:
+          dict with:
+            - 'k_peak' : wavenumber of maximum PSD (cycles/km)
+            - 'lambda_peak_km': wavelength at peak (km) = 1/k_peak (inf if k_peak==0)
+            - 'k_centroid' : spectral centroid (cycles/km) = sum(k * P * dk) / sum(P * dk)
+            - 'lambda_centroid_km' : 1 / k_centroid (km) (inf if centroid==0)
+            - 'lambda_median_km' : wavelength at which cumulative power reaches 50% (km)
+            - 'lambda_geometric_km': geometric mean of wavelength (km)
+            - 'bandwidth_k' : standard deviation of k around centroid (cycles/km)
+            - 'bandwidth_lambda_km' : approximate stddev of lambda (km) computed on lambda values
+            - 'total_power' : sum(P * dk)  (should equal variance if PSD normalized appropriately)
+        Notes:
+          - k_cpkm should be strictly non-negative and monotonic (increasing).
+          - We construct dk from midpoints of k bins; if k are bin centers, ensure spacing is correct.
+        """
+        k = np.asarray(k_cpkm)
+        P = np.asarray(P)
+        if k.shape != P.shape:
+            raise ValueError("k_cpkm and P must have same shape")
+    
+        # Build dk: approximate bin widths using midpoints
+        # If k has length 1, handle trivially
+        if k.size == 1:
+            dk = np.array([k[0]])  # degenerate
+        else:
+            # assume k are bin centers: boundaries halfway between centers
+            kb = np.zeros(k.size + 1)
+            kb[1:-1] = 0.5 * (k[:-1] + k[1:])
+            # leftmost/rightmost edges: mirror spacing
+            kb[0]  = k[0] - (kb[1] - k[0])
+            kb[-1] = k[-1] + (k[-1] - kb[-2])
+            dk = kb[1:] - kb[:-1]
+            # ensure non-negative
+            dk = np.maximum(dk, 1e-16)
+    
+        # total power (discrete integral approximation)
+        total = np.sum(P * dk)
+    
+        # avoid division by zero
+        if total == 0:
+            raise ValueError("Total spectral power is zero. Check PSD input.")
+    
+        # Peak
+        imax = np.nanargmax(P)
+        k_peak = k[imax]
+        lambda_peak = np.inf if k_peak == 0 else 1.0 / k_peak
+    
+        # Centroid (mean k)
+        k_centroid = np.sum(k * P * dk) / total
+        lambda_centroid = np.inf if k_centroid == 0 else 1.0 / k_centroid
+    
+        # Median wavelength: find k_med such that cumulative power up to that k is 0.5
+        # compute cumulative in increasing k (small scale -> large k). But median wavelength we often want
+        # the wavelength where cumulative power from small k (large scales) reaches 0.5.
+        # We'll compute cumulative from low-k to high-k, then find k where cumulative=0.5
+        cumsum = np.cumsum(P * dk)
+        frac = cumsum / total
+        # ensure monotonicity/nan handling
+        frac = np.nan_to_num(frac)
+        idx = np.searchsorted(frac, 0.5)
+        if idx == 0:
+            k_median = k[0]
+        elif idx >= len(k):
+            k_median = k[-1]
+        else:
+            # linear interpolation between k[idx-1] and k[idx]
+            f1, f2 = frac[idx-1], frac[idx]
+            k1, k2 = k[idx-1], k[idx]
+            if f2 == f1:
+                k_median = k1
+            else:
+                t = (0.5 - f1) / (f2 - f1)
+                k_median = k1 + t * (k2 - k1)
+        lambda_median = np.inf if k_median == 0 else 1.0 / k_median
+    
+        # Geometric mean wavelength: integrate ln(lambda) weighted by P
+        # ln(lambda) = -ln(k); careful with k==0 (exclude k==0 bin)
+        positive = k > 0
+        if np.any(positive):
+            ln_lambda = -np.log(k[positive])
+            geom_ln = np.sum(ln_lambda * P[positive] * dk[positive]) / np.sum(P[positive] * dk[positive])
+            lambda_geom = np.exp(geom_ln)
+        else:
+            lambda_geom = np.inf
+    
+        # Spectral variance (bandwidth) in k
+        k_var = np.sum(((k - k_centroid)**2) * P * dk) / total
+        k_sigma = np.sqrt(k_var)
+    
+        # approximate lambda statistics (not exact because lambda = 1/k)
+        lambda_vals = np.zeros_like(k)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            lambda_vals = 1.0 / k
+        # mask infinite (k==0)
+        finite_mask = np.isfinite(lambda_vals)
+        if np.any(finite_mask):
+            lambda_mean = np.sum(lambda_vals[finite_mask] * P[finite_mask] * dk[finite_mask]) / np.sum(P[finite_mask] * dk[finite_mask])
+            lambda_var = np.sum(( (lambda_vals[finite_mask] - lambda_mean)**2 ) * P[finite_mask] * dk[finite_mask]) / np.sum(P[finite_mask] * dk[finite_mask])
+            lambda_sigma = np.sqrt(lambda_var)
+        else:
+            lambda_mean = np.inf
+            lambda_sigma = np.inf
+    
+        out = {
+            'k_peak': float(k_peak),
+            'lambda_peak_km': float(lambda_peak),
+            'k_centroid': float(k_centroid),
+            'lambda_centroid_km': float(lambda_centroid),
+            'lambda_median_km': float(lambda_median),
+            'lambda_geometric_km': float(lambda_geom),
+            'bandwidth_k': float(k_sigma),
+            'bandwidth_lambda_km': float(lambda_sigma),
+            'total_power': float(total),
+        }
+        if return_all:
+            # optionally include arrays used
+            out['k'] = k
+            out['P'] = P
+            out['dk'] = dk
+            out['cumulative_fraction'] = cumsum / total
+        return out
+
+
     def power_spectrum(self, data):
         """Calculate radially averaged 2D FFT power spectrum"""
         self.logger.info(f"Calculating power spectrum on data of shape {data.shape}")
