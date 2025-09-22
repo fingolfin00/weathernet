@@ -6,8 +6,167 @@ from torchmetrics import MeanAbsoluteError, MeanSquaredError, Metric
 from torchmetrics.image import SpatialCorrelationCoefficient
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
+import mpl_toolkits.axisartist.floating_axes as fa
+import mpl_toolkits.axisartist.grid_finder as gf
+from matplotlib.text import Text
 import numpy as np
 from typing import Optional
+
+class ArtistObject:
+    def __init__(self, text):
+        self.my_text = text
+
+
+class LegendHandler:
+    def legend_artist(self, legend, orig_handle, fontsize, handlebox):
+        # The variables x0, y0, width, height were not needed
+        patch = Text(x=0, y=0, text=orig_handle.my_text,
+                     verticalalignment='baseline',
+                     horizontalalignment='left')
+        handlebox.add_artist(patch)
+        return patch
+
+
+class ModifiedTaylorDiagram:
+    def __init__(self, datastd, fig=None, rect=111, normalize='Y',
+                 sd_axis_frac=1.5, fontsize=10):
+
+        # Normalization logic
+        if normalize.upper() == 'Y':
+            self.datastd = 1.0
+            self.normfactor = datastd
+        else:
+            self.datastd = datastd
+            self.normfactor = 1.0
+
+        # Save figure if passed
+        if fig is None:
+            fig = plt.figure()
+        self._fig = fig
+
+        self.smin = 0
+        self.smax = sd_axis_frac * self.datastd
+
+        tr = PolarAxes.PolarTransform()
+
+        # Correlation locations and tick formatting
+        rlocs = np.concatenate((np.arange(10) / 10., [0.95, 0.99]))
+        tlocs = np.arccos(rlocs)
+        gl1 = gf.FixedLocator(tlocs)
+        tf1 = gf.DictFormatter({tl: f"{rl}" for tl, rl in zip(tlocs, rlocs)})
+
+        # Std. Dev. locations and formatting
+        # Using a stable approach for rounding
+        sdlocs_all = np.linspace(self.smin, self.smax, 7)
+        # Round values nicely
+        sdlocs = [float(f"{val:.2g}") for val in sdlocs_all[1:]]
+        sdlocs.append(0)
+        sdlocs = sorted(sdlocs)  # Ensure ascending order if needed
+        gl2 = gf.FixedLocator(sdlocs)
+        tf2 = gf.DictFormatter({sd: f"{sd}" for sd in sdlocs})
+
+        ghelper = fa.GridHelperCurveLinear(tr,
+                                           extremes=(0, np.pi / 2, self.smin, self.smax),
+                                           grid_locator1=gl1,
+                                           grid_locator2=gl2,
+                                           tick_formatter1=tf1,
+                                           tick_formatter2=tf2
+                                           )
+
+        ax = fa.FloatingSubplot(self._fig, rect, grid_helper=ghelper)
+        self._fig.add_subplot(ax)
+
+        # Set axis directions
+        ax.axis["top"].set_axis_direction("bottom")
+        ax.axis["top"].toggle(ticklabels=True, label=True)
+        ax.axis["top"].major_ticklabels.set_axis_direction("top")
+        ax.axis["top"].label.set_axis_direction("top")
+        ax.axis["top"].major_ticklabels.set_color("darkgreen")
+        ax.axis["top"].label.set_color("darkgreen")
+        ax.axis["top"].label.set_text("Correlation")
+        ax.axis["top"].label.set_fontsize(fontsize)
+
+        ax.axis["left"].set_axis_direction("bottom")
+        ax.axis["left"].toggle(ticklabels=True)
+
+        ax.axis["right"].set_axis_direction("top")
+        ax.axis["right"].toggle(ticklabels=True, label=True)
+        ax.axis["right"].major_ticklabels.set_axis_direction("left")
+        if normalize.upper() == 'Y':
+            ax.axis["right"].label.set_text("Normalised standard deviation")
+        else:
+            ax.axis["right"].label.set_text("Standard deviation")
+        ax.axis["right"].label.set_fontsize(fontsize)
+
+        ax.axis["bottom"].set_visible(False)
+
+        ax.grid(False)
+
+        self._ax = ax  # The floating subplot
+        self.ax = ax.get_aux_axes(tr)  # Polar coordinates
+
+        # Reference point and std. dev. contour
+        l, = self.ax.plot([0], self.datastd, 'k*', ls='', ms=10)
+        t = np.linspace(0, np.pi / 2)
+        r = np.zeros_like(t) + self.datastd
+        self.ax.plot(t, r, 'k--', label='_', alpha=0.75)
+
+        self.samplePoints = [l]
+
+        # Add correlation lines for reference
+        for i in np.concatenate((np.arange(1, 10) / 10., [0.99])):
+            self.ax.plot([np.arccos(i), np.arccos(i)], [0, self.smax],
+                         c='darkgreen', alpha=0.35)
+
+    def add_point(self, stddev, corrcoef, modlab, offset=(-12, -12), **kwargs):
+        stddev = stddev / self.normfactor
+        l, = self.ax.plot(np.arccos(corrcoef), stddev, **kwargs)
+        self.samplePoints.append(l)
+        self.ax.annotate(modlab, xy=(np.arccos(corrcoef), stddev),
+                         xytext=offset, textcoords='offset points')
+        return l
+
+    def add_contours(self, levels=6, **kwargs):
+        rs, ts = np.meshgrid(np.linspace(self.smin, self.smax),
+                             np.linspace(0, np.pi / 2))
+        rms = np.sqrt(self.datastd ** 2 + rs ** 2 - 2 * self.datastd * rs * np.cos(ts))
+        contours = self.ax.contour(ts, rs, rms, levels, alpha=0.75, **kwargs)
+        return contours
+
+    def calc_colors(self, bias):
+        bias = bias / self.normfactor
+        largest = max(abs(bias.min()), abs(bias.max()))
+        bias_col = (bias + largest) / (2 * largest)
+        return bias_col
+
+    def add_colorbar(self, bias, num_ticks=5, fontsize=10):
+        bias = bias / self.normfactor
+        largest = max(abs(bias.min()), abs(bias.max()))
+        cnorm = Normalize(vmin=-largest, vmax=largest)
+
+        sm = plt.cm.ScalarMappable(norm=cnorm, cmap=cm.jet)
+        sm.set_array([])
+
+        # Explicitly reference the figure and the main axes for colorbar
+        cbar = self._fig.colorbar(sm, ax=self._ax, orientation='horizontal',
+                                  fraction=0.042, pad=0.1)
+        cbar.locator = MaxNLocator(nbins=num_ticks)
+        cbar.update_ticks()
+        cbar.outline.set_visible(False)
+        cbar.set_label('Bias', fontsize=fontsize)
+
+    def add_legend(self, artist, labels, *args, **kwargs):
+        obj = [ArtistObject(st) for st in artist]
+        if self.normfactor != 1:
+            if self.normfactor > 0.01:
+                obj.append(ArtistObject(f"{self.normfactor:4.2f}"))
+                labels.append('Norm factor')
+            else:
+                obj.append(ArtistObject(f"{self.normfactor:4.2e}"))
+                labels.append('Norm factor')
+
+        dic = {o: LegendHandler() for o in obj}
+        self.ax.legend(obj, labels, handler_map=dic, *args, **kwargs)
 
 class AnomalyCorrelationCoefficient(Metric):
     is_differentiable: Optional[bool] = False
