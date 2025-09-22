@@ -1565,6 +1565,163 @@ class WeatherRun:
     def _print_mean_std_maxmin_str (self, data, technique, data_type, metric, sigdig=2):        
         self.logger.info(f"{(metric.upper())} ({technique:>10}) {data_type:>5} mean: {data[data_type][metric]['average'].mean():.{sigdig}f} +- {data[data_type][metric]['average'].std():.{sigdig}f}, max: {data[data_type][metric]['max']['coords']}->{data[data_type][metric]['max']['value']:.{sigdig}f}, min: {data[data_type][metric]['min']['coords']}->{data[data_type][metric]['min']['value']:.{sigdig}f}")
 
+    def calculate_error_metrics(predictions, ground_truth, lon, lat, mask=None, percentiles=[5, 50, 95]):
+        """
+        Calculate various error metrics and bias
+        """
+        predictions = np.asarray(predictions, dtype=float)
+        ground_truth = np.asarray(ground_truth, dtype=float)
+        if predictions.shape != ground_truth.shape:
+            raise ValueError("predictions and ground_truth must have same shape")
+        # Raw errors (signed differences)
+        raw_errors = predictions - ground_truth
+        # Absolute errors
+        absolute_errors = np.abs(raw_errors)
+        # Squared errors  
+        squared_errors = raw_errors ** 2
+    
+        # Create pixelwise bias, MAE, MSE and RMSE mean maps
+        bias_map = np.mean(raw_errors, axis=0)
+        mae_map = np.mean(absolute_errors, axis=0)
+        mse_map = np.mean(squared_errors, axis=0)
+        rmse_map = np.sqrt(mse_map)
+    
+        # # Scalars, spatial averages of mean maps
+        # bias_map_mean = spatial_stats_weighted(bias_map, lon, lat, mask=mask, use_cell_area=True)
+        # mae_map_mean = spatial_stats_weighted(mae_map, lon, lat, mask=mask, use_cell_area=True)
+        # mse_map_mean = spatial_stats_weighted(mse_map, lon, lat, mask=mask, use_cell_area=True)
+        # rmse_map_mean = spatial_stats_weighted(rmse_map, lon, lat, mask=mask, use_cell_area=True)
+        
+        # Distributions, spatial averages for each sample
+        bias_distro, mae_distro, mse_distro, rmse_distro = [], [], [], []
+        for n in range(raw_errors.shape[0]):
+            bias_spatial_avg, _ = spatial_stats_weighted(raw_errors[n,:,:], lon, lat, mask=mask, use_cell_area=True)
+            mae_spatial_avg, _ = spatial_stats_weighted(absolute_errors[n,:,:], lon, lat, mask=mask, use_cell_area=True)
+            mse_spatial_avg, _ = spatial_stats_weighted(squared_errors[n,:,:], lon, lat, mask=mask, use_cell_area=True)
+            bias_distro.append(bias_spatial_avg)
+            mae_distro.append(mae_spatial_avg)
+            mse_distro.append(mse_spatial_avg)
+            rmse_distro.append(np.sqrt(mse_spatial_avg))
+        bias_distro = np.array(bias_distro)
+        mae_distro = np.array(mae_distro)
+        mse_distro = np.array(mse_distro)
+        rmse_distro = np.array(rmse_distro)
+        # # Means, stds, percentiles of distributions
+        # bias_distro_mean, bias_distro_std = bias_distro.mean(), bias_distro.std()
+        # bias_distro_percentiles = np.percentile(bias_distro, percentiles)
+        # mae_distro_mean, mae_distro_std = mae_distro.mean(), mae_distro.std()
+        # mae_distro_percentiles = np.percentile(mae_distro, percentiles)
+        # mse_distro_mean, mse_distro_std = mse_distro.mean(), mse_distro.std()
+        # mse_distro_percentiles = np.percentile(mse_distro, percentiles)
+        # rmse_distro_mean, rmse_distro_std = rmse_distro.mean(), rmse_distro.std()
+        # rmse_distro_percentiles = np.percentile(rmse_distro, percentiles)
+        
+        # Scalar RMSE
+        rmse = math.sqrt(mse_distro.mean())
+    
+        # Distributions, bootstrap
+        n_bootstrap = 1000
+        bias_mean_bootstrap, mae_mean_bootstrap, mse_mean_bootstrap, rmse_mean_bootstrap = [], [], [], []
+        rmse_bootstrap = []
+        for _ in range(n_bootstrap):
+            indices = np.random.choice(len(rmse_distro), len(rmse_distro), replace=True)
+            # Resample
+            raw_errors_res = predictions[indices,:,:] - ground_truth[indices,:,:]
+            absolute_errors_res = np.abs(raw_errors_res)
+            squared_errors_res = raw_errors_res ** 2
+            bias_distro_res, mae_distro_res, mse_distro_res, rmse_distro_res = [], [], [], []
+            for n in range(raw_errors.shape[0]):
+                bias_spatial_res_avg, _ = spatial_stats_weighted(raw_errors_res[n,:,:], lon, lat, mask=mask, use_cell_area=True)
+                mae_spatial_res_avg, _ = spatial_stats_weighted(absolute_errors_res[n,:,:], lon, lat, mask=mask, use_cell_area=True)
+                mse_spatial_res_avg, _ = spatial_stats_weighted(squared_errors_res[n,:,:], lon, lat, mask=mask, use_cell_area=True)
+                bias_distro_res.append(bias_spatial_res_avg)
+                mae_distro_res.append(mae_spatial_res_avg)
+                mse_distro_res.append(mse_spatial_res_avg)
+                rmse_distro_res.append(np.sqrt(mse_spatial_res_avg))
+            mse_distro_res_mean = np.array(mse_distro_res).mean() # save value so we calculate only once
+            bias_mean_bootstrap.append(np.array(bias_distro_res).mean())
+            mae_mean_bootstrap.append(np.array(mae_distro_res).mean())
+            mse_mean_bootstrap.append(mse_distro_res_mean)
+            rmse_mean_bootstrap.append(np.array(rmse_distro_res).mean()) # mean of resampled 1D RMSE distribution
+            rmse_bootstrap.append(math.sqrt(mse_distro_res_mean)) # scalar RMSE of resampled data
+        bias_mean_bootstrap = np.array(bias_mean_bootstrap)
+        mae_mean_bootstrap = np.array(mae_mean_bootstrap)
+        mse_mean_bootstrap = np.array(mse_mean_bootstrap)
+        rmse_mean_bootstrap = np.array(rmse_mean_bootstrap)
+        rmse_bootstrap = np.array(rmse_bootstrap)
+    
+        return {
+            'raw_errors': raw_errors, 'absolute_errors': absolute_errors, 'squared_errors': squared_errors, # 3D
+            'bias_map': bias_map, 'mae_map': mae_map, 'mse_map': mse_map, 'rmse_map': rmse_map, # maps, sample mean only (spatial dimensions preserved)
+            'bias_distro': bias_distro, 'mae_distro': mae_distro, 'mse_distro': mse_distro, 'rmse_distro': rmse_distro,  # distributions of spatially weighted averages (arrays of N dimension)
+            'rmse': rmse, # scalar RMSE (sqrt after spatial average and sample mean)
+            'bias_mean_bootstrap': bias_mean_bootstrap, 'mae_mean_bootstrap': mae_mean_bootstrap, # bootstrap distributions of spatial snd sample means
+            'mse_mean_bootstrap': mse_mean_bootstrap, 'rmse_mean_bootstrap': rmse_mean_bootstrap,
+            'rmse_bootstrap': rmse_bootstrap # bootstrap distribution of scalar RMSE (sqrt after spatial average and sample mean)
+        }
+
+    def pretty_print_metrics(metrics_dict, metric_str, lon, lat, mask=None, percentiles=[5, 50, 95], confidence=0.95):
+        """
+        Nicely print a dictionary of metrics with scalars and arrays.
+        For large arrays, prints shape and summary stats (min, max, mean, percentiles).
+        """
+        k_max_len = len(max(metrics_dict, key=len))
+        header = (
+            f"{'Key':{k_max_len}s} | {'Shape':16s} | {'Mean':>10s} | {'Std':>10s} | "
+            f"{'p5':>10s} | {'p50':>10s} | {'p95':>10s} | {'ci95':>20s}"
+        )
+        print(f"{metric_str} Comparison:")
+        print("=" * len(header))
+        print(header)
+        print("-" * len(header))
+    
+        for key, value in metrics_dict.items():
+            if np.isscalar(value):
+                print(f"{key:{k_max_len}s} | {'-':16s} | {value:10.4f} | {'-':10s} | {'-':10s} | {'-':10s} | {'-':10s} | {'-':20s}")
+            elif isinstance(value, np.ndarray):
+                if value.ndim == 0:  # scalar wrapped in array
+                    v = value.item()
+                    print(f"{key:20s} | {'-':16s} | {v:10.4f} | {'-':10s} | {'-':10s} | {'-':10s} | {'-':10s} | {'-':20s}")
+                elif value.ndim == 1:
+                    mean = value.mean()
+                    p5, p50, p95 = np.percentile(value, percentiles)
+                    ci = scipy_confidence_interval(value, confidence)
+                    print(
+                        f"{key:{k_max_len}s} | {str(value.shape):16s} | {mean:10.4f} | {value.std():10.4f} | "
+                        f"{p5:10.4f} | {p50:10.4f} | {p95:10.4f} | [{ci[0]:8.4f}, {ci[1]:8.4f}]"
+                    )
+                elif value.ndim == 2:
+                    map_mean, map_std = spatial_stats_weighted(value, lon, lat, mask=mask, use_cell_area=True)
+                    print(
+                        f"{key:{k_max_len}s} | {str(value.shape):16s} | {map_mean:10.4f} | {map_std:10.4f} | "
+                        f"{'-':10s} | {'-':10s} | {'-':10s} | {'-':20s}"
+                    )
+                elif value.ndim == 3:
+                    distro = []
+                    for n in range(value.shape[0]):
+                        spatial_avg, _ = spatial_stats_weighted(value[n,:,:], lon, lat, mask=mask, use_cell_area=True)
+                        distro.append(spatial_avg)
+                    distro = np.array(distro)
+                    p5, p50, p95 = np.percentile(distro, percentiles)
+                    print(
+                        f"{key:{k_max_len}s} | {str(value.shape):16s} | {distro.mean():10.4f} | {distro.std():10.4f} | "
+                        f"{p5:10.4f} | {p50:10.4f} | {p95:10.4f} | {'-':20s}"
+                    )
+            else:
+                print(f"{key:{k_max_len}s} | {'?':16s} | {str(value):>10s}")
+    
+    def rel_improvement (baseline, improved, metric_name):
+        improvement = baseline - improved
+        improvement_mean = improvement
+        baseline_mean = baseline
+        if baseline.ndim >= 1:
+            improvement_mean = improvement.mean()
+            baseline_mean = baseline.mean()
+        return {f'{metric_name}_rel_improv': improvement_mean / baseline_mean * 100, f'{metric_name}_abs_improv': improvement_mean, f'{metric_name}_improv_distro': improvement}
+    
+    def scipy_confidence_interval(data, confidence=0.95):
+        return stats.t.interval(confidence, len(data)-1, loc=np.mean(data), scale=stats.sem(data))
+        
     def print_stats (self, inputs, targets, outputs, bootstrap, regular, lonfc, latfc, lonan, latan, sigdig=2):
         self.logger.info(f"----------------------------------------")
         self.logger.info(f"Statistics (time-average):")
