@@ -13,11 +13,13 @@
     log_level               = "info" # "debug"
 
 [data]
-    var_forecast            = "gh" # "t"    "u10"
-    var_analysis            = "gh" # "T2M"  "U10M"
+    var_forecast            = "msl" # "t2m", "u10", "gh", "msl"
+    var_analysis            = "msl" # "t2m", "u10", "gh", "msl"
+    unit_forecast           = 'Pa' # 'K', 'Pa'
+    unit_analysis           = 'Pa' # 'K', 'Pa'
     var3d                   = true
     error_limit             = 100 # 0 means no error limit
-    levhpa                  = 500
+    levhpa                  = 500 # use very low value (e.g. 2) for 2d variables
     # Nord Atlantic box
     # source                  = "ecmwf"
     # lonini                  = -55
@@ -33,8 +35,8 @@
     latini                  = 49
     latfin                  = 25.5
     full_domain             = true
-    domain_size             = 128 # if set lonfin and latfin are ignored
-    interpolation_size      = 128 # if different interpolation is triggered
+    domain_size             = 128 # if set, lonfin and latfin are ignored
+    interpolation_size      = 128 # if different from domain_size, interpolation is triggered
     detrend                 = false
     deseason                = false
     anomaly                 = false

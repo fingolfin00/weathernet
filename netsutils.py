@@ -124,6 +124,8 @@ class WeatherRun:
         # Data
         self.var_forecast            = self.config["data"]["var_forecast"]
         self.var_analysis            = self.config["data"]["var_analysis"]
+        self.unit_forecast           = self.config["data"]["unit_forecast"]
+        self.unit_analysis           = self.config["data"]["unit_analysis"]
         self.var3d                   = self.config["data"]["var3d"]
         self.error_limit             = self.config["data"]["error_limit"]
         self.levhpa                  = self.config["data"]["levhpa"]
