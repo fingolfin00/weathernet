@@ -1552,6 +1552,131 @@ class WeatherRun:
         plt.ylabel('P(k)')
         plt.savefig(self.fig_folder + f"power_spectrum_{self.test_start_date.strftime(self.plot_date_strformat)}-{self.test_end_date.strftime(self.plot_date_strformat)}.png")
 
+    def spatial_powerspectrum_welch (self, data, fs):
+        """
+        Compute power spectra using Welch's method.
+        Parameters:
+        - data: 2D array of values (lat, lon)
+        - fs: sampling frequency in degrees
+        Returns:
+        - fxx, fyy: wavenumbers
+        - Pxx, Pyy: power spectral densities
+        """
+        from scipy.signal import welch
+        # Welch spectral analysis params, noverlap < nperseg
+        nperseg, noverlap, nfft = 50, 30, 100
+        Pxy, Pyx = [], []
+        # Compute Welch's power spectra
+        for i in range(data.shape[0]):
+            # all longitudes at fixed latitude for all latitudes
+            fyy, Py = welch(data[i, :], fs, nperseg=nperseg, noverlap=noverlap, nfft=nfft)
+            Pyx.append(Py[1:])
+        for j in range(data.shape[1]):
+            # all latitudes at fixed longitude for all longitudes
+            fxx, Px = welch(data[:, j], fs, nperseg=nperseg, noverlap=noverlap, nfft=nfft)
+            Pxy.append(Px[1:])
+        self.logger.info(f"Welch lon idx {j}: fxx {fxx}")
+        self.logger.info(f"Welch lat idx {i}: fyy {fyy}")
+        return fxx[1:], fyy[1:], np.array(Pxy), np.array(Pyx)
+
+    def _create_ps_axes (
+        self, data, fs, lon, lat, axs, title,
+        normalize=True, vmin_plt=None, vmax_plt=None, cmap='jet',
+        cbar_orientation = 'vertical', cbar_label='log(P)'
+    ):
+        """Create zonal and meridional power spectrum plots using Welch's method on given axes"""
+        fxx, fyy, Pxy, Pyx = self.spatial_powerspectrum_welch(data, fs)
+        if normalize:
+            total_px = np.sum(Pxy*fxx)
+            total_py = np.sum(Pyx*fyy)
+            self.logger.info(f"PS Welch {title}: total_px: {total_px}, total_py: {total_py}")
+            Pxy /= total_px
+            Pyx /= total_py
+        Pxy, Pyx = np.log(Pxy), np.log(Pyx)
+        vmin_plt = np.min([np.min(Pxy), np.min(Pyx)]) if vmin_plt is None else vmin_plt
+        vmax_plt = np.max([np.max(Pxy), np.max(Pyx)]) if vmax_plt is None else vmax_plt
+        vcenter_plt = 0 if vmin_plt < 0 and vmax_plt > 0 else vmin_plt+(vmax_plt-vmin_plt)/2
+        self.logger.info(f"PS Welch {title}: vmin: {vmin_plt}, vmax: {vmax_plt}, vcenter: {vcenter_plt}")
+        P, F, L = [Pxy, Pyx], [fxx, fyy], [lon, lat]
+        labels = ['Meridional', 'Zonal']
+        xlabels = ['Longitude', 'Latitude']
+        invert_yaxis_bool = [True, False]
+        ims, cbs = [], []
+        for ax, label, xlabel, inverty, p, l, f in zip(axs, labels, xlabels, invert_yaxis_bool, P, L, F):
+            im = ax.pcolormesh(
+                1/f, l, p, label=label, cmap=cmap,
+                norm=TwoSlopeNorm(vmin=vmin_plt, vmax=vmax_plt, vcenter=vcenter_plt)
+            )
+            ims.append(im)
+            ax.set_title(f'{label} {title}')
+            ax.set_xlabel('Wavelength (degree)')
+            ax.set_ylabel(f'{xlabel} (degrees)')
+            ax.set_xscale('log')
+            ax.invert_yaxis() if inverty else None
+            divider = make_axes_locatable(ax)
+            cax = divider.append_axes("right", size="2%", pad=0.05, axes_class=plt.Axes)
+            cb = ax.figure.colorbar(im, cax=cax, orientation=cbar_orientation, label=cbar_label)
+            cbs.append(cb)
+        return ims, cbs
+
+
+    def plot_ps_welch (
+        self, data, ground_truth, fs, lon, lat, normalize=True,
+        vmin_power_mean=None, vmax_power_mean=None,
+        vmin_power_var=None, vmax_power_var=None,
+        vmin_power_rmse=None, vmax_power_rmse=None,
+        cmap='jet'
+    ):
+        data2d = data[:,0,:,:].mean(axis=0)
+        var2d = data[:,0,:,:].var(axis=0)
+        rmse_spatial = np.sqrt(np.mean((data - ground_truth)**2, axis=0))[0,:,:]
+        fig = plt.figure(figsize=(12, 18)) # col, row
+        n_rows = 6
+        ax1 = fig.add_subplot(n_rows,2,1)
+        ax2 = fig.add_subplot(n_rows,2,2)
+        ax3 = fig.add_subplot(n_rows,2,3)
+        ax4 = fig.add_subplot(n_rows,2,4)
+        ax5 = fig.add_subplot(n_rows,1,3, projection=ccrs.PlateCarree())
+        ax6 = fig.add_subplot(n_rows,1,4, projection=ccrs.PlateCarree())
+        ax7 = fig.add_subplot(n_rows,2,9)
+        ax8 = fig.add_subplot(n_rows,2,10)
+        ax9 = fig.add_subplot(n_rows,1,6, projection=ccrs.PlateCarree())
+        # Mean and variance power spectra
+        self._create_ps_axes(
+            data2d, fs, lon, lat, [ax1, ax2], normalize=normalize, vmin_plt=vmin_power_mean, vmax_plt=vmax_power_mean,
+            title=f"Power Spectrum mean {self.var_forecast}"
+        )
+        self._create_ps_axes(
+            var2d, fs, lon, lat, [ax3, ax4], normalize=normalize, vmin_plt=vmin_power_var, vmax_plt=vmax_power_var,
+            title=f"Power Spectrum var {self.var_forecast}"
+        )
+        vmin_data, vmax_data = data2d.min(), data2d.max()
+        vcenter_data = 0 if vmin_data < 0 and vmax_data > 0 else vmin_data+(vmax_data-vmin_data)/2
+        self._create_cartopy_axis(
+            ax5, f"Mean {self.var_forecast}", data2d, lon, lat,
+            vmin_data, vmax_data, vcenter_data, self.cmap, self.unit_forecast, borders=True
+        )
+        vmin_data, vmax_data = var2d.min(), var2d.max()
+        vcenter_data = 0 if vmin_data < 0 and vmax_data > 0 else vmin_data+(vmax_data-vmin_data)/2
+        self._create_cartopy_axis(
+            ax6, f"Var {self.var_forecast}", var2d, lon, lat,
+            vmin_data, vmax_data, vcenter_data, self.cmap, self.unit_forecast, borders=True
+        )
+        # RMSE power spectrum
+        self._create_ps_axes(
+            rmse_spatial, fs, lon, lat, [ax7, ax8], normalize=normalize, vmin_plt=vmin_power_rmse, vmax_plt=vmax_power_rmse,
+            title=f"Power Spectrum RMSE {self.var_forecast}"
+        )
+        vmin_data, vmax_data = rmse_spatial.min(), rmse_spatial.max()
+        vcenter_data = 0 if vmin_data < 0 and vmax_data > 0 else vmin_data+(vmax_data-vmin_data)/2
+        self._create_cartopy_axis(
+            ax9, f"RMSE {self.var_forecast}", rmse_spatial, lon, lat,
+            vmin_data, vmax_data, vcenter_data, self.cmap, self.unit_forecast, borders=True
+        )
+        plt.tight_layout()
+        plt.savefig(f"{self.combo_base_path}/power_spectrum_{self.var_forecast}.png")
+        plt.close()
+
     @staticmethod
     def _maxmin_index_values (data):
         max_arg, min_arg = data.argmax(), data.argmin()
