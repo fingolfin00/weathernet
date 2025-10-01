@@ -1,4 +1,4 @@
-import glob, os, sys, torch, datetime, cfgrib, time, toml, importlib, colorlog, logging, subprocess, psutil
+import glob, os, sys, torch, datetime, cfgrib, time, toml, importlib, colorlog, logging, subprocess, psutil, math
 from torch import nn
 from torch.utils.data import random_split, Dataset, DataLoader, SubsetRandomSampler
 import torch.nn.functional as F
@@ -1552,6 +1552,17 @@ class WeatherRun:
         plt.ylabel('P(k)')
         plt.savefig(self.fig_folder + f"power_spectrum_{self.test_start_date.strftime(self.plot_date_strformat)}-{self.test_end_date.strftime(self.plot_date_strformat)}.png")
 
+    @staticmethod
+    def gc_distance(loc1, loc2, R=6378.1):
+        """
+        Return the great-circle distance between two points on a sphere of radius
+        R, provided as (latitude, longitude) pairs, loc=(phi, lamdbda) in degrees.
+        """
+        haversin = lambda alpha: math.sin(alpha/2)**2
+        (phi1, lambda1), (phi2, lambda2) = loc1, loc2
+        d = 2 * R * math.asin(math.sqrt(haversin(math.radians(phi2-phi1)) + math.cos(math.radians(phi1))*math.cos(math.radians(phi2))*haversin(math.radians(lambda2-lambda1))))
+        return d
+
     def spatial_powerspectrum_welch (self, data, fs):
         """
         Compute power spectra using Welch's method.
@@ -1581,7 +1592,7 @@ class WeatherRun:
 
     def _create_ps_axes (
         self, data, fs, lon, lat, axs, title,
-        normalize=True, vmin_plt=None, vmax_plt=None, cmap='jet',
+        normalize=True, distance='km' , vmin_plt=None, vmax_plt=None, cmap='jet',
         cbar_orientation = 'vertical', cbar_label='log P',
     ):
         """Create zonal and meridional power spectrum plots using Welch's method on given axes"""
@@ -1597,19 +1608,29 @@ class WeatherRun:
         vmax_plt = np.max([np.max(Pxy), np.max(Pyx)]) if vmax_plt is None else vmax_plt
         vcenter_plt = 0 if vmin_plt < 0 and vmax_plt > 0 else vmin_plt+(vmax_plt-vmin_plt)/2
         self.logger.info(f"PS Welch {title}: vmin: {vmin_plt}, vmax: {vmax_plt}, vcenter: {vcenter_plt}")
-        P, F, L = [Pxy, Pyx], [fxx, fyy], [lon, lat]
+        if distance == 'km':
+            kxx_km, kyy_km = np.zeros_like(fxx), np.zeros_like(fyy)
+            for idx_kxx in np.arange(len(fxx)):
+                for idx_kyy in np.arange(len(fyy)):
+                    kxx_km[idx_kxx] = self.gc_distance((0, 1/fyy[idx_kyy]), (1/fxx[idx_kxx], 1/fyy[idx_kyy]))
+                    kyy_km[idx_kyy] = self.gc_distance((1/fxx[idx_kxx], 0), (1/fxx[idx_kxx], 1/fyy[idx_kyy]))
+            kxx, kyy = kxx_km, kyy_km
+        else:
+            kxx, kyy = 1/fxx, 1/fyy
+
+        P, K, L = [Pxy, Pyx], [kxx, kyy], [lon, lat]
         labels = ['Meridional', 'Zonal']
         xlabels = ['Longitude', 'Latitude']
         invert_yaxis_bool = [True, False]
         ims, cbs = [], []
-        for ax, label, xlabel, inverty, p, l, f in zip(axs, labels, xlabels, invert_yaxis_bool, P, L, F):
+        for ax, label, xlabel, inverty, p, l, k in zip(axs, labels, xlabels, invert_yaxis_bool, P, L, K):
             im = ax.pcolormesh(
-                1/f, l, p, label=label, cmap=cmap,
+                k, l, p, label=label, cmap=cmap,
                 norm=TwoSlopeNorm(vmin=vmin_plt, vmax=vmax_plt, vcenter=vcenter_plt)
             )
             ims.append(im)
             ax.set_title(f'{label} {title}')
-            ax.set_xlabel('Wavelength (degrees)')
+            ax.set_xlabel(f'Wavelength ({distance})')
             ax.set_ylabel(f'{xlabel} (degrees)')
             ax.set_xscale('log')
             ax.invert_yaxis() if inverty else None
