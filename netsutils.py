@@ -1665,8 +1665,8 @@ class WeatherRun:
             corrected2d = corrected[:,0,:,:].mean(axis=0)
             corrected_var2d = corrected[:,0,:,:].var(axis=0)
             rmse_corrected_spatial = np.sqrt(np.mean((corrected - ground_truth)**2, axis=0))[0,:,:]
-            rmse_diff_lon = rmse_spatial.mean(axis=0) - rmse_corrected_spatial.mean(axis=0)
-            rmse_diff_lat = rmse_spatial.mean(axis=1) - rmse_corrected_spatial.mean(axis=1)
+            rmse_diff_lon = (rmse_spatial.mean(axis=0) - rmse_corrected_spatial.mean(axis=0)) / rmse_spatial.mean(axis=0) * 100
+            rmse_diff_lat = (rmse_spatial.mean(axis=1) - rmse_corrected_spatial.mean(axis=1)) / rmse_spatial.mean(axis=1) * 100
         date_string = f"({self.test_start_date.strftime(self.folder_date_strformat)} - {self.test_end_date.strftime(self.folder_date_strformat)})"
         nrows, ncols = 6 if corrected is None else 9, 1
         # H, W = data2d.shape[-2], data2d.shape[-1]
@@ -1703,7 +1703,7 @@ class WeatherRun:
             title=f"Power Spectrum variance original {self.var_forecast}"
         )
         if corrected is not None:
-            title_plot_rmse = f"RMSE original - corrected ({self.unit_forecast})"
+            title_plot_rmse = f"RMSE improvement (%)"
             ax1_sec = self._create_twin_axis(ax1, rmse_diff_lon, lon, title_plot_rmse)
             ax2_sec = self._create_twin_axis(ax2, rmse_diff_lat, lat, title_plot_rmse)
             ax3_sec = self._create_twin_axis(ax3, rmse_diff_lon, lon, title_plot_rmse)
