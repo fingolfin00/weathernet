@@ -1660,23 +1660,26 @@ class WeatherRun:
         return ax_sec
 
     def plot_ps_welch (
-        self, data, ground_truth, fs, lon, lat, corrected=None, normalize=True,
+        self, data, ground_truth, fs, lon, lat, corrected=None, normalize_power_spectrum=True, rmse_spatial_plot_type='percent',
         vmin_power_mean=None, vmax_power_mean=None,
         vmin_power_var=None, vmax_power_var=None,
         vmin_power_rmse=None, vmax_power_rmse=None,
-        trim=5, cmap='jet'
+        trim=5, cmap='jet', extra_info=None
     ):
         data2d = data[:,0,:,:].mean(axis=0)
         var2d = data[:,0,:,:].var(axis=0)
         rmse_spatial = np.sqrt(np.mean((data - ground_truth)**2, axis=0))[0,:,:]
+        rmse_spatial_percent = np.sqrt(np.mean(((data - ground_truth)/ground_truth*100)**2, axis=0))[0,:,:]
+        # _, _, Pxy_rmse, Pyx_rmse = self.spatial_powerspectrum_welch(rmse_spatial, fs)
         if corrected is not None:
             corrected2d = corrected[:,0,:,:].mean(axis=0)
             corrected_var2d = corrected[:,0,:,:].var(axis=0)
             rmse_corrected_spatial = np.sqrt(np.mean((corrected - ground_truth)**2, axis=0))[0,:,:]
+            rmse_corrected_spatial_percent = np.sqrt(np.mean(((corrected - ground_truth)/ground_truth*100)**2, axis=0))[0,:,:]
             rmse_diff_lon = (rmse_spatial.mean(axis=0) - rmse_corrected_spatial.mean(axis=0)) / rmse_spatial.mean(axis=0) * 100
             rmse_diff_lat = (rmse_spatial.mean(axis=1) - rmse_corrected_spatial.mean(axis=1)) / rmse_spatial.mean(axis=1) * 100
         date_string = f"({self.test_start_date.strftime(self.folder_date_strformat)} - {self.test_end_date.strftime(self.folder_date_strformat)})"
-        nrows, ncols = 6 if corrected is None else 9, 1
+        nrows, ncols = 6 if corrected is None else 10, 1
         # H, W = data2d.shape[-2], data2d.shape[-1]
         ax_height = 9  # H inches per subplot
         # ax_width = ax_height * W / H // 2
@@ -1695,19 +1698,20 @@ class WeatherRun:
             ax8 = fig.add_subplot(nrows,ncols,6, projection=ccrs.PlateCarree())
             ax9 = fig.add_subplot(nrows,ncols*2,13)
             ax10 = fig.add_subplot(nrows,ncols*2,14)
-            ax11 = fig.add_subplot(nrows,ncols,8, projection=ccrs.PlateCarree())
-            ax12 = fig.add_subplot(nrows,ncols,9, projection=ccrs.PlateCarree())
+            ax11 = fig.add_subplot(nrows,ncols,8, projection=ccrs.PlateCarree())  # RMSE original
+            ax12 = fig.add_subplot(nrows,ncols,9, projection=ccrs.PlateCarree())  # RMSE corrected
+            ax13 = fig.add_subplot(nrows,ncols,10, projection=ccrs.PlateCarree()) # RMSE diff
         else:
             ax9 = fig.add_subplot(nrows,ncols*2,9)
             ax10 = fig.add_subplot(nrows,ncols*2,10)
             ax11 = fig.add_subplot(nrows,ncols,6, projection=ccrs.PlateCarree())
         # Mean and variance power spectra
         self._create_ps_axes(
-            data2d, fs, lon, lat, [ax1, ax2], normalize=normalize, vmin_plt=vmin_power_mean, vmax_plt=vmax_power_mean,
+            data2d, fs, lon, lat, [ax1, ax2], normalize=normalize_power_spectrum, vmin_plt=vmin_power_mean, vmax_plt=vmax_power_mean,
             title=f"Power Spectrum mean original {self.var_forecast}"
         )
         self._create_ps_axes(
-            var2d, fs, lon, lat, [ax3, ax4], normalize=normalize, vmin_plt=vmin_power_var, vmax_plt=vmax_power_var,
+            var2d, fs, lon, lat, [ax3, ax4], normalize=normalize_power_spectrum, vmin_plt=vmin_power_var, vmax_plt=vmax_power_var,
             title=f"Power Spectrum variance original {self.var_forecast}"
         )
         if corrected is not None:
@@ -1718,47 +1722,70 @@ class WeatherRun:
             ax4_sec = self._create_twin_axis(ax4, rmse_diff_lat, lat, title_plot_rmse)
         vmin_data, vmax_data = (np.min([data2d.min(), corrected2d[trim:-trim,trim:-trim].min()]), np.max([data2d.max(), corrected2d[trim:-trim,trim:-trim].max()])) if corrected is not None else (data2d.min(), data2d.max())
         vcenter_data = 0 if vmin_data < 0 and vmax_data > 0 else vmin_data+(vmax_data-vmin_data)/2
+        title_plot = f"Mean original {self.var_forecast} {extra_info} {date_string}" if extra_info else f"Mean original {self.var_forecast} {date_string}"
         self._create_cartopy_axis(
-            ax5, f"Mean original {self.var_forecast} {date_string}", data2d, lon, lat,
+            ax5, title_plot, data2d, lon, lat,
             vmin_data, vmax_data, vcenter_data, self.cmap, self.unit_forecast, borders=True
         )
         if corrected is not None:
+            title_plot = f"Mean corrected {self.var_forecast} {extra_info} {date_string}" if extra_info else f"Mean corrected {self.var_forecast} {date_string}"
             self._create_cartopy_axis(
-                ax7, f"Mean corrected {self.var_forecast} {date_string}", corrected2d, lon, lat,
+                ax7, title_plot, corrected2d, lon, lat,
                 vmin_data, vmax_data, vcenter_data, self.cmap, self.unit_forecast, borders=True
             )
         vmin_data, vmax_data = (np.min([var2d.min(), corrected_var2d[trim:-trim,trim:-trim].min()]), np.max([var2d.max(), corrected_var2d[trim:-trim,trim:-trim].max()])) if corrected is not None else (var2d.min(), var2d.max())
         vcenter_data = 0 if vmin_data < 0 and vmax_data > 0 else vmin_data+(vmax_data-vmin_data)/2
+        title_plot = f"Variance original {self.var_forecast} {extra_info} {date_string}" if extra_info else f"Variance original {self.var_forecast} {date_string}"
         self._create_cartopy_axis(
-            ax6, f"Variance original {self.var_forecast} {date_string}", var2d, lon, lat,
+            ax6, title_plot, var2d, lon, lat,
             vmin_data, vmax_data, vcenter_data, self.cmap, self.unit_forecast, borders=True
         )
         if corrected is not None:
+            title_plot = f"Variance corrected {self.var_forecast} {extra_info} {date_string}" if extra_info else f"Variance corrected {self.var_forecast} {date_string}"
             self._create_cartopy_axis(
-                ax8, f"Variance corrected {self.var_forecast} {date_string}", corrected_var2d, lon, lat,
+                ax8, title_plot, corrected_var2d, lon, lat,
                 vmin_data, vmax_data, vcenter_data, self.cmap, self.unit_forecast, borders=True
             )
         # RMSE power spectrum
         self._create_ps_axes(
-            rmse_spatial, fs, lon, lat, [ax9, ax10], normalize=normalize, vmin_plt=vmin_power_rmse, vmax_plt=vmax_power_rmse,
+            rmse_spatial, fs, lon, lat, [ax9, ax10], normalize=normalize_power_spectrum, vmin_plt=vmin_power_rmse, vmax_plt=vmax_power_rmse,
             title=f"Power Spectrum original RMSE {self.var_forecast}"
         )
         if corrected is not None:
             ax9_sec = self._create_twin_axis(ax9, rmse_diff_lon, lon, title_plot_rmse)
             ax10_sec = self._create_twin_axis(ax10, rmse_diff_lat, lat, title_plot_rmse)
-        vmin_data, vmax_data = (np.min([rmse_spatial.min(), rmse_corrected_spatial[trim:-trim,trim:-trim].min()]), np.max([rmse_spatial.max(), rmse_corrected_spatial[trim:-trim,trim:-trim].max()])) if corrected is not None else (rmse_spatial.min(), rmse_spatial.max())
+        if rmse_spatial_plot_type == 'percent':
+            rmse_spatial_plot = rmse_spatial_percent
+            rmse_unit_plot = '%'
+        else:
+            rmse_spatial_plot = rmse_spatial
+            rmse_unit_plot = self.unit_forecast
+        vmin_data, vmax_data = (np.min([rmse_spatial_plot.min(), rmse_corrected_spatial[trim:-trim,trim:-trim].min()]), np.max([rmse_spatial_plot.max(), rmse_spatial_plot[trim:-trim,trim:-trim].max()])) if corrected is not None else (rmse_spatial_plot.min(), rmse_spatial_plot.max())
         vcenter_data = 0 if vmin_data < 0 and vmax_data > 0 else vmin_data+(vmax_data-vmin_data)/2
+        title_plot = f"RMSE original {self.var_forecast} {extra_info} {date_string}" if extra_info else f"RMSE original {self.var_forecast} {date_string}"
         self._create_cartopy_axis(
-            ax11, f"RMSE original {self.var_forecast} {date_string}", rmse_spatial, lon, lat,
-            vmin_data, vmax_data, vcenter_data, self.cmap, self.unit_forecast, borders=True
+            ax11, title_plot, rmse_spatial_plot, lon, lat,
+            vmin_data, vmax_data, vcenter_data, self.cmap, rmse_unit_plot, borders=True
         )
         if corrected is not None:
+            rmse_corrected_spatial_plot = rmse_corrected_spatial_percent if rmse_spatial_plot_type == 'percent' else rmse_corrected_spatial
+            title_plot = f"RMSE corrected {self.var_forecast} {extra_info} {date_string}" if extra_info else f"RMSE corrected {self.var_forecast} {date_string}"
             self._create_cartopy_axis(
-                ax12, f"RMSE corrected {self.var_forecast} {date_string}", rmse_corrected_spatial, lon, lat,
-                vmin_data, vmax_data, vcenter_data, self.cmap, self.unit_forecast, borders=True
+                ax12, title_plot, rmse_corrected_spatial_plot, lon, lat,
+                vmin_data, vmax_data, vcenter_data, self.cmap, rmse_unit_plot, borders=True
+            )
+            rmse_improv = rmse_spatial - rmse_corrected_spatial
+            v_abs = np.max([-np.min(rmse_improv[trim:-trim,trim:-trim]), np.max(rmse_improv[trim:-trim,trim:-trim])])
+            vmin_data, vmax_data = -v_abs, v_abs
+            vcenter_data = 0 if vmin_data < 0 and vmax_data > 0 else vmin_data+(vmax_data-vmin_data)/2
+            title_plot = f"RMSE original - corrected {self.var_forecast} {extra_info} {date_string}" if extra_info else f"RMSE original - corrected {self.var_forecast} {date_string}"
+            self._create_cartopy_axis(
+                ax13, title_plot, rmse_improv, lon, lat,
+                vmin_data, vmax_data, vcenter_data, self.cmap_error, self.unit_forecast, borders=True
             )
         plt.tight_layout()
-        plt.savefig(f"{self.fig_folder}/power_spectrum_{self.var_forecast}.png")
+        extra_info_suffix = f"_{extra_info}" if extra_info else ""
+        plt.savefig(f"{self.fig_folder}/power_spectrum_{self.var_forecast}{extra_info_suffix}.png")
         plt.close()
 
     @staticmethod
