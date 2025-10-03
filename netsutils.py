@@ -1641,13 +1641,14 @@ class WeatherRun:
             )
             ims.append(im)
             ax.set_title(f'{label} {title}')
-            ax.set_xlabel(f'Wavelength ({distance})')
-            ax.set_ylabel(f'{xlabel} (degrees)')
+            ax.set_xlabel(f'Wavelength [{distance}]')
+            ax.set_ylabel(f'{xlabel} [degrees]')
             ax.set_xscale('log')
             ax.invert_yaxis() if inverty else None
             divider = make_axes_locatable(ax)
             cax = divider.append_axes("right", size="2%", pad=0.05, axes_class=plt.Axes)
-            cb = ax.figure.colorbar(im, cax=cax, orientation=cbar_orientation, label=f"{cbar_label} ({self.unit_forecast}$^2 \\times$ degrees)")
+            cbar_unit = f'({self.unit_forecast})' if '/' in self.unit_forecast else self.unit_forecast
+            cb = ax.figure.colorbar(im, cax=cax, orientation=cbar_orientation, label=f"{cbar_label} [{cbar_unit}$^2 \\times$ degrees]")
             cbs.append(cb)
         return ims, cbs
 
@@ -1718,7 +1719,7 @@ class WeatherRun:
             title=f"Power Spectrum variance original {self.var_forecast}"
         )
         if corrected is not None:
-            title_plot_rmse = f"RMSE improvement (%)"
+            title_plot_rmse = f"RMSE improvement [%]"
             ax1_sec = self._create_twin_axis(ax1, rmse_diff_lon, lon, title_plot_rmse)
             ax2_sec = self._create_twin_axis(ax2, rmse_diff_lat, lat, title_plot_rmse)
             ax3_sec = self._create_twin_axis(ax3, rmse_diff_lon, lon, title_plot_rmse)
