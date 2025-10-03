@@ -5,10 +5,11 @@
     # net                     = "WeatherResNetUNet"
     net                     = "SmaAt_UNet"
     accumulate_grad_batches = 2
-    save_data_path          = "data/numpy/"
-    extra_data_path         = "data/extra/"
+    save_data_path          = "data/numpy/"  # common
+    extra_data_path         = "data/extra/"  # common
     figure_path             = "figures/"
-    weights_path            = "data/weights/"
+    weights_path            = "data/weights/" # per-run
+    scaler_path             = "data/scalers/" # per-run
     print_date_strformat    = "%Y-%m-%d,%H:%M"
     log_level               = "info" # "debug"
 
