@@ -1668,18 +1668,18 @@ class WeatherRun:
         vmin_power_mean=None, vmax_power_mean=None,
         vmin_power_var=None, vmax_power_var=None,
         vmin_power_rmse=None, vmax_power_rmse=None,
-        trim=5, cmap='jet', extra_info=None
+        trim=5, cmap='jet', extra_info=None, sigma=6,
     ):
         data2d = data[:,0,:,:].mean(axis=0)
         var2d = data[:,0,:,:].var(axis=0)
-        rmse_spatial = np.sqrt(np.mean((data - ground_truth)**2, axis=0))[0,:,:]
-        rmse_spatial_percent = np.sqrt(np.mean(((data - ground_truth)/ground_truth*100)**2, axis=0))[0,:,:]
+        rmse_spatial = np.sqrt(np.mean((ground_truth - data)**2, axis=0))[0,:,:]
+        rmse_spatial_percent = 100 * np.sqrt(np.mean((1 - data / ground_truth)**2, axis=0))[0,:,:]
         # _, _, Pxy_rmse, Pyx_rmse = self.spatial_powerspectrum_welch(rmse_spatial, fs)
         if corrected is not None:
             corrected2d = corrected[:,0,:,:].mean(axis=0)
             corrected_var2d = corrected[:,0,:,:].var(axis=0)
-            rmse_corrected_spatial = np.sqrt(np.mean((corrected - ground_truth)**2, axis=0))[0,:,:]
-            rmse_corrected_spatial_percent = np.sqrt(np.mean(((corrected - ground_truth)/ground_truth*100)**2, axis=0))[0,:,:]
+            rmse_corrected_spatial = np.sqrt(np.mean((ground_truth - corrected)**2, axis=0))[0,:,:]
+            rmse_corrected_spatial_percent = 100 * np.sqrt(np.mean((1 - corrected / ground_truth)**2, axis=0))[0,:,:]
             rmse_diff_lon = (rmse_spatial.mean(axis=0) - rmse_corrected_spatial.mean(axis=0)) / rmse_spatial.mean(axis=0) * 100
             rmse_diff_lat = (rmse_spatial.mean(axis=1) - rmse_corrected_spatial.mean(axis=1)) / rmse_spatial.mean(axis=1) * 100
         date_string = f"({self.test_start_date.strftime(self.folder_date_strformat)} - {self.test_end_date.strftime(self.folder_date_strformat)})"
@@ -1764,15 +1764,25 @@ class WeatherRun:
         else:
             rmse_spatial_plot = rmse_spatial
             rmse_unit_plot = self.unit_forecast
-        vmin_data, vmax_data = (np.min([rmse_spatial_plot.min(), rmse_corrected_spatial[trim:-trim,trim:-trim].min()]), np.max([rmse_spatial_plot.max(), rmse_spatial_plot[trim:-trim,trim:-trim].max()])) if corrected is not None else (rmse_spatial_plot.min(), rmse_spatial_plot.max())
+        if corrected is not None:
+            rmse_corrected_spatial_plot = rmse_corrected_spatial_percent if rmse_spatial_plot_type == 'percent' else rmse_corrected_spatial
+            vmin_data, vmax_data = (np.min([rmse_spatial_plot.min(), rmse_corrected_spatial_plot[trim:-trim,trim:-trim].min()]), np.max([rmse_spatial_plot.max(), rmse_corrected_spatial_plot[trim:-trim,trim:-trim].max()]))
+            # vmin_data, vmax_data = (
+            #     np.min([rmse_spatial_plot.mean() - sigma*rmse_spatial_plot.std(),
+            #             rmse_corrected_spatial_plot[trim:-trim,trim:-trim].mean() - rmse_corrected_spatial_plot[trim:-trim,trim:-trim].std()]),
+            #     np.max([rmse_spatial_plot.mean() + sigma*rmse_spatial_plot.std(),
+            #             rmse_corrected_spatial_plot[trim:-trim,trim:-trim].mean() + rmse_corrected_spatial_plot[trim:-trim,trim:-trim].std()]),
+            #     )
+        else:
+            vmin_data, vmax_data = (rmse_spatial_plot.min(), rmse_spatial_plot.max())
         vcenter_data = 0 if vmin_data < 0 and vmax_data > 0 else vmin_data+(vmax_data-vmin_data)/2
+        self.logger.info(f"RMSE plots vmin: {vmin_data}, vcenter: {vcenter_data}, vmax: {vmax_data}")
         title_plot = f"RMSE original {self.var_forecast} {extra_info} {date_string}" if extra_info else f"RMSE original {self.var_forecast} {date_string}"
         self._create_cartopy_axis(
             ax11, title_plot, rmse_spatial_plot, lon, lat,
             vmin_data, vmax_data, vcenter_data, self.cmap, rmse_unit_plot, borders=True
         )
         if corrected is not None:
-            rmse_corrected_spatial_plot = rmse_corrected_spatial_percent if rmse_spatial_plot_type == 'percent' else rmse_corrected_spatial
             title_plot = f"RMSE corrected {self.var_forecast} {extra_info} {date_string}" if extra_info else f"RMSE corrected {self.var_forecast} {date_string}"
             self._create_cartopy_axis(
                 ax12, title_plot, rmse_corrected_spatial_plot, lon, lat,
