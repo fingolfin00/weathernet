@@ -1087,11 +1087,12 @@ class WeatherRun:
             # vmin_power_rmse=-20, vmax_power_rmse=-4
         )
         # Denormalize
-        inputs = test_dataset.denormalize_forecast(np.array(inputs))
-        targets = test_dataset.denormalize_analysis(np.array(targets))
-        predictions = test_dataset.denormalize_analysis(np.array(outputs))
-        # return inputs, targets, predictions
-        return X_np_test, y_np_test, predictions
+        inputs = test_dataset.denormalize_forecast(inputs)
+        targets = test_dataset.denormalize_analysis(targets)
+        predictions_denorm_an = test_dataset.denormalize_analysis(outputs)
+        predictions_denorm_fn = test_dataset.denormalize_forecast(outputs)
+        return inputs, targets, predictions_denorm_an, predictions_denorm_fn
+        # return X_np_test, y_np_test, predictions
 
     def _is_port_in_use(self, port, host='0.0.0.0'):
         """Checks if the given port is already in use."""
