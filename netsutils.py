@@ -2015,7 +2015,12 @@ class WeatherRun:
         self.logger.info(f"Bias (   regular)  pred weighted mean: {outputs_reg_bias_wmean:.{sigdig}f} +- {outputs_reg_bias_wstd:.{sigdig}f}")
         self.logger.info(f"----------------------------------------")
 
-    def plot_averages (self, inputs, targets, outputs, lonfc, latfc, lonan, latan, vmin_plt_rmse=None, vmax_plt_rmse=None, vmin_plt_bias=None, vmax_plt_bias=None):
+    def plot_averages (
+        self, inputs, targets, outputs, lonfc, latfc, lonan, latan, extra_info=None,
+        vmin_plt_rmse=None, vmax_plt_rmse=None, vmin_plt_bias=None, vmax_plt_bias=None,
+        vmin_plt_rmse_diff=None, vmax_plt_rmse_diff=None, vmin_plt_bias_diff=None, vmax_plt_bias_diff=None
+    ):
+        extra_info_path = f"_{extra_info}" if extra_info else ""
         self.logger.info(f"Data shapes: input {inputs.shape}, target {targets.shape}, prediction {outputs.shape}")
         bootstrap = self._bootstrap_stats(inputs, targets, outputs, lonfc, latfc)
         regular = self._regular_stats(inputs, targets, outputs)
@@ -2027,7 +2032,7 @@ class WeatherRun:
         bias_in_avg_plot = plt_stats['input']['bias']['average']
         bias_out_avg_plot = plt_stats['pred']['bias']['average']
 
-        nrows, ncols = 2, 2
+        nrows, ncols = 3, 2
         H, W = inputs.shape[-2], inputs.shape[-1]
         ax_height = 5  # H inches per subplot
         ax_width = ax_height * W / H
@@ -2047,6 +2052,10 @@ class WeatherRun:
         if vmax_plt_rmse == None:
             vmax_plt_rmse = rmse_in_avg_plot.max()
         vcenter_plt_rmse = 0 if vmin_plt_rmse < 0 and vmax_plt_rmse > 0 else vmin_plt_rmse+(vmax_plt_rmse-vmin_plt_rmse)/2
+        if vmin_plt_rmse_diff == None:
+            vmin_plt_rmse_diff = np.min(rmse_in_avg_plot - rmse_out_avg_plot)
+        if vmax_plt_rmse_diff == None:
+            vmax_plt_rmse_diff = np.max(rmse_in_avg_plot - rmse_out_avg_plot)
         # vmin_plt_bias = np.min([np.min(bias_in_avg_plot), np.min(bias_out_avg_plot)])
         # vmax_plt_bias = np.max([np.max(bias_in_avg_plot), np.max(bias_out_avg_plot)])
         if vmin_plt_bias == None:
@@ -2054,6 +2063,10 @@ class WeatherRun:
         if vmax_plt_bias == None:
             vmax_plt_bias = np.max(bias_in_avg_plot)
         vcenter_plt_bias = 0 if vmin_plt_bias < 0 and vmax_plt_bias > 0 else vmin_plt_bias+(vmax_plt_bias-vmin_plt_bias)/2
+        if vmin_plt_bias_diff == None:
+            vmin_plt_bias_diff = np.min(np.abs(bias_in_avg_plot) - np.abs(bias_out_avg_plot))
+        if vmax_plt_bias_diff == None:
+            vmax_plt_bias_diff = np.max(np.abs(bias_in_avg_plot) - np.abs(bias_out_avg_plot))
 
         title_details = f" {self.var_forecast}a" if self.anomaly else f" {self.var_forecast}"
         title_details += " (deseasonalized)" if self.deseason else ""
@@ -2062,13 +2075,15 @@ class WeatherRun:
 
         # RMSE
         self._create_cartopy_axis(axs[0], 'RMSE' + title_details, rmse_in_avg_plot, lonfc, latfc, vmin_plt_rmse, vmax_plt_rmse, vcenter_plt_rmse, self.cmap, self.unit_forecast, borders=True)
-        self._create_cartopy_axis(axs[1], 'RMSE corrected' + title_details, rmse_out_avg_plot, lonfc, latfc, vmin_plt_rmse, vmax_plt_rmse, vcenter_plt_rmse, self.cmap, self.unit_forecast, borders=True)
+        self._create_cartopy_axis(axs[2], 'RMSE corrected' + title_details, rmse_out_avg_plot, lonfc, latfc, vmin_plt_rmse, vmax_plt_rmse, vcenter_plt_rmse, self.cmap, self.unit_forecast, borders=True)
+        self._create_cartopy_axis(axs[4], 'RMSE - RMSE corrected' + title_details, rmse_in_avg_plot-rmse_out_avg_plot, lonfc, latfc, vmin_plt_rmse_diff, vmax_plt_rmse_diff, 0, self.cmap_error, self.unit_forecast, borders=True)
         # bias
-        self._create_cartopy_axis(axs[2], 'bias' + title_details, bias_in_avg_plot, lonfc, latfc, vmin_plt_bias, vmax_plt_bias, vcenter_plt_bias, self.cmap_error, self.unit_forecast, borders=True)
+        self._create_cartopy_axis(axs[1], 'bias' + title_details, bias_in_avg_plot, lonfc, latfc, vmin_plt_bias, vmax_plt_bias, vcenter_plt_bias, self.cmap_error, self.unit_forecast, borders=True)
         self._create_cartopy_axis(axs[3], 'bias corrected' + title_details, bias_out_avg_plot, lonfc, latfc, vmin_plt_bias, vmax_plt_bias, vcenter_plt_bias, self.cmap_error, self.unit_forecast, borders=True)
+        self._create_cartopy_axis(axs[5], 'bias - bias corrected' + title_details, np.abs(bias_in_avg_plot)-np.abs(bias_out_avg_plot), lonfc, latfc, vmin_plt_bias_diff, vmax_plt_bias_diff, 0, self.cmap_error, self.unit_forecast, borders=True)
 
         plt.tight_layout()
-        plt.savefig(self.fig_folder + f"rmse-bias_{self.test_start_date.strftime(self.plot_date_strformat)}-{self.test_end_date.strftime(self.plot_date_strformat)}.png")
+        plt.savefig(self.fig_folder + f"rmse-bias{extra_info_path}.png")
         plt.close()
 
         results_df = pd.DataFrame({'input': bootstrap['input']['rmse']['percentiles'], 'pred': bootstrap['pred']['rmse']['percentiles']}, index=["2.5% RMSE", "Median RMSE", "97.5% RMSE"]).T
@@ -2082,7 +2097,7 @@ class WeatherRun:
         plt.xlim(vmin_plt_rmse, vmax_plt_rmse)
         plt.tight_layout()
         plt.grid(True, axis='x')
-        plt.savefig(self.fig_folder + f"boxplot_{self.test_start_date.strftime(self.plot_date_strformat)}-{self.test_end_date.strftime(self.plot_date_strformat)}.png")
+        plt.savefig(self.fig_folder + f"boxplot{extra_info_path}.png")
         plt.close()
 
     def plot_figures (self, date, inputs, targets, outputs, lonfc, latfc, lonan, latan):
