@@ -1,4 +1,4 @@
-import glob, os, sys, torch, datetime, cfgrib, time, toml, importlib, colorlog, logging, subprocess, psutil, math
+import glob, os, sys, torch, datetime, cfgrib, time, toml, importlib, colorlog, logging, subprocess, psutil, math, joblib
 from torch import nn
 from torch.utils.data import random_split, Dataset, DataLoader, SubsetRandomSampler
 import torch.nn.functional as F
@@ -204,6 +204,7 @@ class WeatherRun:
         # self.extra_data_folder       = self.run_path + self.config["global"]["extra_data_path"]
         self.fig_folder              = self.run_path + self.config["global"]["figure_path"]
         self.weights_folder          = self.run_path + self.config["global"]["weights_path"]
+        self.scaler_folder           = self.run_path + self.config["global"]["scaler_path"]
         # Log
         self.log_level_str           = self.config["global"]["log_level"]
         self.log_level               = getattr(logging, self.log_level_str.upper())
@@ -255,6 +256,7 @@ class WeatherRun:
             # os.makedirs(self.extra_data_folder, exist_ok=True)
             os.makedirs(self.fig_folder, exist_ok=True)
             os.makedirs(self.weights_folder, exist_ok=True)
+            os.makedirs(self.scaler_folder, exist_ok=True)
             os.makedirs(self.tl_logdir, exist_ok=True)
         os.makedirs(self.log_folder, exist_ok=True)
         # Model
@@ -972,7 +974,7 @@ class WeatherRun:
             self.logger.info(f"Train step workers (CPUs) in use: {num_workers}")
             # Tensorboard
             tl_logger = TensorBoardLogger(self.tl_logdir, name=self.run_base_name, version=self.run_number)
-            dataset = WeatherDataset(X_np, y_np, self.Scaler, self.interpolation_size, self.logger)
+            dataset = WeatherDataset(X_np, y_np, self.Scaler, self.scaler_folder, self.interpolation_size, self.logger)
             # Split into train and test based on self.train_percent
             datamodule = WeatherDataModule(dataset, train_fraction=self.train_percent, batch_size=self.batch_size, seed=seed, num_workers=num_workers)
             # num_samples = X_np.shape[0]
@@ -1047,7 +1049,7 @@ class WeatherRun:
         # tl_logger = TensorBoardLogger(self.tl_logdir, name=self.run_base_name, version=f"test_{self.run_number}")
         self.logger.info(f"Input  mean before test: {X_np_test.mean()}, max: {X_np_test.max()}, min: {X_np_test.min()}")
         self.logger.info(f"Target mean before test: {y_np_test.mean()}, max: {y_np_test.max()}, min: {y_np_test.min()}")
-        test_dataset = WeatherDataset(X_np_test, y_np_test, self.Scaler, self.interpolation_size, self.logger)
+        test_dataset = WeatherDataset(X_np_test, y_np_test, self.Scaler, self.scaler_folder, self.interpolation_size, self.logger, loadscaler=True)
         # Create data loaders
         test_dataloader = DataLoader(test_dataset, batch_size=1, num_workers=num_workers, shuffle=False)
         # Load weights
@@ -2198,10 +2200,12 @@ class WeatherRun:
 
 
 class WeatherDataset(Dataset):
-    def __init__(self, forecasts, analyses, Scaler, size, logger):
+    def __init__(self, forecasts, analyses, Scaler, scaler_path, size, logger, loadscaler=False):
         super().__init__()
         self.logger = logger
         self.Scaler = Scaler
+        self.scaler_path = scaler_path
+        self.loadscaler = loadscaler
         self.forecasts = forecasts
         self.analyses = analyses
         # Interpolate if provided size is different from original size
@@ -2231,14 +2235,14 @@ class WeatherDataset(Dataset):
                 self.forecasts = self.forecasts.numpy()
                 self.analyses = self.analyses.numpy()
         # Normalize data
-        self.forecasts, self.fc_scaler = self._normalize(self.forecasts)
-        self.analyses, self.an_scaler = self._normalize(self.analyses)
+        self.forecasts, self.fc_scaler = self._normalize(self.forecasts, "forecast")
+        self.analyses, self.an_scaler = self._normalize(self.analyses, "analysis")
         self.forecasts = torch.from_numpy(self.forecasts).float()
         self.analyses = torch.from_numpy(self.analyses).float()
         self.logger.info(f"Forecast tensor shape: {self.forecasts.shape}")
         self.logger.info(f"Analysis tensor shape: {self.analyses.shape}")
 
-    def _normalize (self, data):
+    def _normalize (self, data, scaler_name):
         # Remove channel dimension (channel number C is always 1)
         N, C, H, W = np.shape(data)
         self.logger.debug(f"Data before normalization: {np.shape(data)}")
@@ -2246,7 +2250,11 @@ class WeatherDataset(Dataset):
         # Reshape along samples N
         data = data.reshape(N, -1)
         self.logger.debug(f"Reshaped data before normalization: {np.shape(data)}")
-        scaler = self.Scaler().fit(data)
+        if self.loadscaler:
+            scaler = joblib.load(f"{self.scaler_path}{scaler_name}.gz")
+        else:
+            scaler = self.Scaler().fit(data)
+            joblib.dump(scaler, f"{self.scaler_path}{scaler_name}.gz")
         scaled_data = scaler.transform(data)
         self.logger.debug(f"Data after normalization: {np.shape(scaled_data)}")
         scaled_data = scaled_data.reshape(N, C, H, W)
