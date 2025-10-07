@@ -1043,7 +1043,7 @@ class WeatherRun:
             # Save model weights
             # self.save_weights()
 
-    def test (self, X_np_test, y_np_test, date_range, lon, lat):
+    def test (self, X_np_test, y_np_test, date_range):
         num_workers = min(os.cpu_count(), 8)  # safe default
         # Tensorboard
         # tl_logger = TensorBoardLogger(self.tl_logdir, name=self.run_base_name, version=f"test_{self.run_number}")
@@ -1079,19 +1079,13 @@ class WeatherRun:
             targets.append(target[0,:,:,:].cpu())
             outputs.append(self.model.test_preds[idx,:,:,:])
         inputs, targets, outputs = np.array(inputs), np.array(targets), np.array(outputs)
-        self.plot_ps_welch(
-            inputs, targets, 1/0.1, lon, lat, corrected=outputs,
-            normalize_power_spectrum=True, extra_info="normalized", rmse_spatial_plot_type='regular',
-            # vmin_power_mean=-23, vmax_power_mean=-4,
-            # vmin_power_var=-25, vmax_power_var=-4,
-            # vmin_power_rmse=-20, vmax_power_rmse=-4
-        )
+        normalized_data = (inputs, targets, outputs)
         # Denormalize
         inputs = test_dataset.denormalize_forecast(inputs)
         targets = test_dataset.denormalize_analysis(targets)
         predictions_denorm_an = test_dataset.denormalize_analysis(outputs)
         predictions_denorm_fn = test_dataset.denormalize_forecast(outputs)
-        return inputs, targets, predictions_denorm_an, predictions_denorm_fn
+        return inputs, targets, predictions_denorm_an, predictions_denorm_fn, normalized_data
         # return X_np_test, y_np_test, predictions
 
     def _is_port_in_use(self, port, host='0.0.0.0'):
