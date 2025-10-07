@@ -1137,6 +1137,21 @@ class WeatherRun:
             except Exception as e:
                 self.logger.error(f"An error occurred: {e}")
 
+    def _create_rectangular_axis(
+        self, ax, title, var, x, y, vmin_plt, vmax_plt, vcenter_plt, cmap, cbar_label,
+        borders=False
+    ):
+        ax.set_title(title)
+        im = ax.pcolormesh(
+            x, y, var,
+            norm=TwoSlopeNorm(vmin=vmin_plt, vmax=vmax_plt, vcenter=vcenter_plt), cmap=cmap
+        )
+        cbar_orientation = "vertical"
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("right", size="2%", pad=0.05, axes_class=plt.Axes)
+        cb = ax.figure.colorbar(im, cax=cax, orientation=cbar_orientation, label=cbar_label)
+        return im, cb
+
     def _create_cartopy_axis (
         self, ax, title, var, lon, lat, vmin_plt, vmax_plt, vcenter_plt, cmap, cbar_label,
         borders=False
@@ -1568,40 +1583,48 @@ class WeatherRun:
         d = 2 * R * math.asin(math.sqrt(haversin(math.radians(phi2-phi1)) + math.cos(math.radians(phi1))*math.cos(math.radians(phi2))*haversin(math.radians(lambda2-lambda1))))
         return d
 
-    def spatial_powerspectrum_welch (self, data, fs):
+    def powerspectrum_welch_2d (self, data, fsx, fsy):
         """
         Compute power spectra using Welch's method.
         Parameters:
-        - data: 2D array of values (lat, lon)
+        - data: 2D array of values (lat, lon) or (time, lat) or (time, lon)
         - fs: sampling frequency in degrees
         Returns:
         - fxx, fyy: wavenumbers
-        - Pxx, Pyy: power spectral densities
+        - Pxy, Pyx: power spectral densities along y, x for all x, y
         """
         from scipy.signal import welch
         # Welch spectral analysis params, noverlap < nperseg
         nperseg, noverlap, nfft = 50, 30, 100
         Pxy, Pyx = [], []
         # Compute Welch's power spectra
-        for i in range(data.shape[0]):
-            # all longitudes at fixed latitude for all latitudes
-            fyy, Py = welch(data[i, :], fs, nperseg=nperseg, noverlap=noverlap, nfft=nfft)
+        for i in range(data.shape[0]): # ps along x axis at fixed y for all y's
+            fyy, Py = welch(data[i, :], fsx, nperseg=nperseg, noverlap=noverlap, nfft=nfft)
             Pyx.append(Py[1:])
-        for j in range(data.shape[1]):
-            # all latitudes at fixed longitude for all longitudes
-            fxx, Px = welch(data[:, j], fs, nperseg=nperseg, noverlap=noverlap, nfft=nfft)
+        for j in range(data.shape[1]): # ps along y axis at fixed x for all x's
+            fxx, Px = welch(data[:, j], fsy, nperseg=nperseg, noverlap=noverlap, nfft=nfft)
             Pxy.append(Px[1:])
-        self.logger.debug(f"Welch lon idx {j}: fxx {fxx}")
-        self.logger.debug(f"Welch lat idx {i}: fyy {fyy}")
+        self.logger.debug(f"Welch x idx {j}: fxx {fxx}")
+        self.logger.debug(f"Welch y idx {i}: fyy {fyy}")
         return fxx[1:], fyy[1:], np.array(Pxy), np.array(Pyx)
 
     def _create_ps_axes (
-        self, data, fs, lon, lat, axs, title,
-        normalize=True, distance='km' , vmin_plt=None, vmax_plt=None, cmap='jet',
-        cbar_orientation = 'vertical', cbar_label='log P',
+        self, data, fs, x, y, axs, title,
+        ps_along_axes=['Meridional', 'Zonal'], ylabels=['Longitude', 'Latitude'], invert_yaxis_bool=[True, False],
+        normalize=True, units=('km','km'), vmin_plt=None, vmax_plt=None, cmap='jet',
+        cbar_orientation = 'vertical', cbar_label='log P'
     ):
         """Create zonal and meridional power spectrum plots using Welch's method on given axes"""
-        fxx, fyy, Pxy, Pyx = self.spatial_powerspectrum_welch(data, fs)
+        unitx, unity = units
+        fsx, fsy = fs
+        self.logger.info(f"PS Welch {title} data shape: {data.shape}")
+        self.logger.info(f"PS Welch {title} x shape: {x.shape}")
+        self.logger.info(f"PS Welch {title} y shape: {y.shape}")
+        fxx, fyy, Pxy, Pyx = self.powerspectrum_welch_2d(data, fsx, fsy)
+        self.logger.info(f"PS Welch {title} fxx shape: {fxx.shape}")
+        self.logger.info(f"PS Welch {title} fyy shape: {fyy.shape}")
+        self.logger.info(f"PS Welch {title} Pxy shape: {Pxy.shape}")
+        self.logger.info(f"PS Welch {title} Pyx shape: {Pyx.shape}")
         if normalize:
             total_px = np.sum(Pxy*fxx)
             total_py = np.sum(Pyx*fyy)
@@ -1613,7 +1636,7 @@ class WeatherRun:
         vmax_plt = np.max([np.max(Pxy), np.max(Pyx)]) if vmax_plt is None else vmax_plt
         vcenter_plt = 0 if vmin_plt < 0 and vmax_plt > 0 else vmin_plt+(vmax_plt-vmin_plt)/2
         self.logger.info(f"PS Welch {title}: vmin: {vmin_plt}, vmax: {vmax_plt}, vcenter: {vcenter_plt}")
-        if distance == 'km':
+        if unitx == 'km' and unity == 'km':
             kxx_km, kyy_km = np.zeros_like(fxx), np.zeros_like(fyy)
             for idx_kxx in np.arange(len(fxx)):
                 for idx_kyy in np.arange(len(fyy)):
@@ -1622,27 +1645,25 @@ class WeatherRun:
             kxx, kyy = kxx_km, kyy_km
         else:
             kxx, kyy = 1/fxx, 1/fyy
-
-        P, K, L = [Pxy, Pyx], [kxx, kyy], [lon, lat]
-        labels = ['Meridional', 'Zonal']
-        xlabels = ['Longitude', 'Latitude']
-        invert_yaxis_bool = [True, False]
+        self.logger.info(f"PS Welch {title} kxx shape: {kxx.shape}")
+        self.logger.info(f"PS Welch {title} kyy shape: {kyy.shape}")
+        P, K, L, Ux, Uy = [Pxy, Pyx], [kxx, kyy], [x, y], [unitx, unity], [unity, unitx]
         ims, cbs = [], []
-        for ax, label, xlabel, inverty, p, l, k in zip(axs, labels, xlabels, invert_yaxis_bool, P, L, K):
+        for ax, ps_along_ax, ylabel, inverty, p, l, k, ux, uy in zip(axs, ps_along_axes, ylabels, invert_yaxis_bool, P, L, K, Ux, Uy):
             im = ax.pcolormesh(
-                k, l, p, label=label, cmap=cmap,
+                k, l, p, label=ps_along_ax, cmap=cmap,
                 norm=TwoSlopeNorm(vmin=vmin_plt, vmax=vmax_plt, vcenter=vcenter_plt)
             )
             ims.append(im)
-            ax.set_title(f'{label} {title}')
-            ax.set_xlabel(f'Wavelength [{distance}]')
-            ax.set_ylabel(f'{xlabel} [degrees]')
+            ax.set_title(f'{ps_along_ax} {title}')
+            ax.set_xlabel(f'Wavelength [{ux}]')
+            ax.set_ylabel(f'{ylabel} [{uy}]')
             ax.set_xscale('log')
             ax.invert_yaxis() if inverty else None
             divider = make_axes_locatable(ax)
             cax = divider.append_axes("right", size="2%", pad=0.05, axes_class=plt.Axes)
             cbar_unit = f'({self.unit_forecast})' if '/' in self.unit_forecast else self.unit_forecast
-            cb = ax.figure.colorbar(im, cax=cax, orientation=cbar_orientation, label=f"{cbar_label} [{cbar_unit}$^2 \\times$ degrees]")
+            cb = ax.figure.colorbar(im, cax=cax, orientation=cbar_orientation, label=f"{cbar_label} [{cbar_unit}$^2 \\times$ {ux}]")
             cbs.append(cb)
         return ims, cbs
 
@@ -1658,24 +1679,26 @@ class WeatherRun:
         return ax_sec
 
     def plot_ps_welch (
-        self, data, ground_truth, fs, lon, lat, corrected=None, normalize_power_spectrum=True, rmse_spatial_plot_type='percent',
+        self, data, ground_truth, fs, x, y, axis_mean=0,
+        ps_along_axes=['Meridional', 'Zonal'], ylabels=['Longitude', 'Latitude'], invert_yaxis_bool=[True, False],
+        corrected=None, normalize_power_spectrum=True, rmse_spatial_plot_type='percent',
         vmin_power_mean=None, vmax_power_mean=None,
         vmin_power_var=None, vmax_power_var=None,
         vmin_power_rmse=None, vmax_power_rmse=None,
-        trim=5, cmap='jet', extra_info=None, sigma=6,
+        trim=5, cmap='jet', extra_info=None, projection='platecarree', sigma=6, units_ps=('km', 'km')
     ):
-        data2d = data[:,0,:,:].mean(axis=0)
-        var2d = data[:,0,:,:].var(axis=0)
-        rmse_spatial = np.sqrt(np.mean((ground_truth - data)**2, axis=0))[0,:,:]
-        rmse_spatial_percent = 100 * np.sqrt(np.mean((1 - data / ground_truth)**2, axis=0))[0,:,:]
-        # _, _, Pxy_rmse, Pyx_rmse = self.spatial_powerspectrum_welch(rmse_spatial, fs)
+        data2d = np.squeeze(data.mean(axis=axis_mean))
+        self.logger.info(f"PS Welch data2d shape: {data2d.shape}")
+        var2d = np.squeeze(data.var(axis=axis_mean))
+        rmse_spatial = np.squeeze(np.sqrt(np.mean((ground_truth - data)**2, axis=axis_mean)))
+        rmse_spatial_percent = 100 * np.squeeze(np.sqrt(np.mean((1 - data / ground_truth)**2, axis=axis_mean)))
         if corrected is not None:
-            corrected2d = corrected[:,0,:,:].mean(axis=0)
-            corrected_var2d = corrected[:,0,:,:].var(axis=0)
-            rmse_corrected_spatial = np.sqrt(np.mean((ground_truth - corrected)**2, axis=0))[0,:,:]
-            rmse_corrected_spatial_percent = 100 * np.sqrt(np.mean((1 - corrected / ground_truth)**2, axis=0))[0,:,:]
-            rmse_diff_lon = (rmse_spatial.mean(axis=0) - rmse_corrected_spatial.mean(axis=0)) / rmse_spatial.mean(axis=0) * 100
-            rmse_diff_lat = (rmse_spatial.mean(axis=1) - rmse_corrected_spatial.mean(axis=1)) / rmse_spatial.mean(axis=1) * 100
+            corrected2d = np.squeeze(corrected.mean(axis=axis_mean))
+            corrected_var2d = np.squeeze(corrected.var(axis=axis_mean))
+            rmse_corrected_spatial = np.squeeze(np.sqrt(np.mean((ground_truth - corrected)**2, axis=axis_mean)))
+            rmse_corrected_spatial_percent = 100 * np.squeeze(np.sqrt(np.mean((1 - corrected / ground_truth)**2, axis=axis_mean)))
+            rmse_diff_x = (rmse_spatial.mean(axis=0) - rmse_corrected_spatial.mean(axis=0)) / rmse_spatial.mean(axis=0) * 100
+            rmse_diff_y = (rmse_spatial.mean(axis=1) - rmse_corrected_spatial.mean(axis=1)) / rmse_spatial.mean(axis=1) * 100
         date_string = f"({self.test_start_date.strftime(self.folder_date_strformat)} - {self.test_end_date.strftime(self.folder_date_strformat)})"
         nrows, ncols = 6 if corrected is None else 10, 1
         # H, W = data2d.shape[-2], data2d.shape[-1]
@@ -1685,73 +1708,85 @@ class WeatherRun:
         self.logger.info(f"Creating figure with size: {ncols * ax_width} x {nrows * ax_height}")
         plt.rcParams.update({'font.size': 22})
         fig = plt.figure(figsize=(ncols * ax_width, nrows * ax_height))
+        if projection == 'platecarree':
+            proj = ccrs.PlateCarree()
+            create_axis_f = self._create_cartopy_axis
+        else:
+            proj = projection
+            create_axis_f = self._create_rectangular_axis
         ax1 = fig.add_subplot(nrows,ncols*2,1)
         ax2 = fig.add_subplot(nrows,ncols*2,2)
         ax3 = fig.add_subplot(nrows,ncols*2,3)
         ax4 = fig.add_subplot(nrows,ncols*2,4)
-        ax5 = fig.add_subplot(nrows,ncols,3, projection=ccrs.PlateCarree())
-        ax6 = fig.add_subplot(nrows,ncols,4, projection=ccrs.PlateCarree())
+        ax5 = fig.add_subplot(nrows,ncols,3, projection=proj)
+        ax6 = fig.add_subplot(nrows,ncols,4, projection=proj)
         if corrected is not None:
-            ax7 = fig.add_subplot(nrows,ncols,5, projection=ccrs.PlateCarree())
-            ax8 = fig.add_subplot(nrows,ncols,6, projection=ccrs.PlateCarree())
+            ax7 = fig.add_subplot(nrows,ncols,5, projection=proj)
+            ax8 = fig.add_subplot(nrows,ncols,6, projection=proj)
             ax9 = fig.add_subplot(nrows,ncols*2,13)
             ax10 = fig.add_subplot(nrows,ncols*2,14)
-            ax11 = fig.add_subplot(nrows,ncols,8, projection=ccrs.PlateCarree())  # RMSE original
-            ax12 = fig.add_subplot(nrows,ncols,9, projection=ccrs.PlateCarree())  # RMSE corrected
-            ax13 = fig.add_subplot(nrows,ncols,10, projection=ccrs.PlateCarree()) # RMSE diff
+            ax11 = fig.add_subplot(nrows,ncols,8, projection=proj)  # RMSE original
+            ax12 = fig.add_subplot(nrows,ncols,9, projection=proj)  # RMSE corrected
+            ax13 = fig.add_subplot(nrows,ncols,10, projection=proj) # RMSE diff
         else:
             ax9 = fig.add_subplot(nrows,ncols*2,9)
             ax10 = fig.add_subplot(nrows,ncols*2,10)
-            ax11 = fig.add_subplot(nrows,ncols,6, projection=ccrs.PlateCarree())
+            ax11 = fig.add_subplot(nrows,ncols,6, projection=proj)
         # Mean and variance power spectra
         self._create_ps_axes(
-            data2d, fs, lon, lat, [ax1, ax2], normalize=normalize_power_spectrum, vmin_plt=vmin_power_mean, vmax_plt=vmax_power_mean,
-            title=f"Power Spectrum mean original {self.var_forecast}"
+            data2d, fs, x, y, [ax1, ax2], units=units_ps,
+            title=f"Power Spectrum mean original {self.var_forecast}",
+            ps_along_axes=ps_along_axes, ylabels=ylabels, invert_yaxis_bool=invert_yaxis_bool,
+            normalize=normalize_power_spectrum, vmin_plt=vmin_power_mean, vmax_plt=vmax_power_mean
         )
         self._create_ps_axes(
-            var2d, fs, lon, lat, [ax3, ax4], normalize=normalize_power_spectrum, vmin_plt=vmin_power_var, vmax_plt=vmax_power_var,
-            title=f"Power Spectrum variance original {self.var_forecast}"
+            var2d, fs, x, y, [ax3, ax4], units=units_ps,
+            title=f"Power Spectrum variance original {self.var_forecast}",
+            ps_along_axes=ps_along_axes, ylabels=ylabels, invert_yaxis_bool=invert_yaxis_bool,
+            normalize=normalize_power_spectrum, vmin_plt=vmin_power_var, vmax_plt=vmax_power_var
         )
         if corrected is not None:
             title_plot_rmse = f"RMSE improvement [%]"
-            ax1_sec = self._create_twin_axis(ax1, rmse_diff_lon, lon, title_plot_rmse)
-            ax2_sec = self._create_twin_axis(ax2, rmse_diff_lat, lat, title_plot_rmse)
-            ax3_sec = self._create_twin_axis(ax3, rmse_diff_lon, lon, title_plot_rmse)
-            ax4_sec = self._create_twin_axis(ax4, rmse_diff_lat, lat, title_plot_rmse)
+            ax1_sec = self._create_twin_axis(ax1, rmse_diff_x, x, title_plot_rmse)
+            ax2_sec = self._create_twin_axis(ax2, rmse_diff_y, y, title_plot_rmse)
+            ax3_sec = self._create_twin_axis(ax3, rmse_diff_x, x, title_plot_rmse)
+            ax4_sec = self._create_twin_axis(ax4, rmse_diff_y, y, title_plot_rmse)
         vmin_data, vmax_data = (np.min([data2d.min(), corrected2d[trim:-trim,trim:-trim].min()]), np.max([data2d.max(), corrected2d[trim:-trim,trim:-trim].max()])) if corrected is not None else (data2d.min(), data2d.max())
         vcenter_data = 0 if vmin_data < 0 and vmax_data > 0 else vmin_data+(vmax_data-vmin_data)/2
         title_plot = f"Mean original {self.var_forecast} {extra_info} {date_string}" if extra_info else f"Mean original {self.var_forecast} {date_string}"
-        self._create_cartopy_axis(
-            ax5, title_plot, data2d, lon, lat,
+        create_axis_f(
+            ax5, title_plot, data2d, x, y,
             vmin_data, vmax_data, vcenter_data, self.cmap, self.unit_forecast, borders=True
         )
         if corrected is not None:
             title_plot = f"Mean corrected {self.var_forecast} {extra_info} {date_string}" if extra_info else f"Mean corrected {self.var_forecast} {date_string}"
-            self._create_cartopy_axis(
-                ax7, title_plot, corrected2d, lon, lat,
+            create_axis_f(
+                ax7, title_plot, corrected2d, x, y,
                 vmin_data, vmax_data, vcenter_data, self.cmap, self.unit_forecast, borders=True
             )
         vmin_data, vmax_data = (np.min([var2d.min(), corrected_var2d[trim:-trim,trim:-trim].min()]), np.max([var2d.max(), corrected_var2d[trim:-trim,trim:-trim].max()])) if corrected is not None else (var2d.min(), var2d.max())
         vcenter_data = 0 if vmin_data < 0 and vmax_data > 0 else vmin_data+(vmax_data-vmin_data)/2
         title_plot = f"Variance original {self.var_forecast} {extra_info} {date_string}" if extra_info else f"Variance original {self.var_forecast} {date_string}"
-        self._create_cartopy_axis(
-            ax6, title_plot, var2d, lon, lat,
+        create_axis_f(
+            ax6, title_plot, var2d, x, y,
             vmin_data, vmax_data, vcenter_data, self.cmap, self.unit_forecast, borders=True
         )
         if corrected is not None:
             title_plot = f"Variance corrected {self.var_forecast} {extra_info} {date_string}" if extra_info else f"Variance corrected {self.var_forecast} {date_string}"
-            self._create_cartopy_axis(
-                ax8, title_plot, corrected_var2d, lon, lat,
+            create_axis_f(
+                ax8, title_plot, corrected_var2d, x, y,
                 vmin_data, vmax_data, vcenter_data, self.cmap, self.unit_forecast, borders=True
             )
         # RMSE power spectrum
         self._create_ps_axes(
-            rmse_spatial, fs, lon, lat, [ax9, ax10], normalize=normalize_power_spectrum, vmin_plt=vmin_power_rmse, vmax_plt=vmax_power_rmse,
+            rmse_spatial, fs, x, y, [ax9, ax10], units=units_ps,
+            ps_along_axes=ps_along_axes, ylabels=ylabels, invert_yaxis_bool=invert_yaxis_bool,
+            normalize=normalize_power_spectrum, vmin_plt=vmin_power_rmse, vmax_plt=vmax_power_rmse,
             title=f"Power Spectrum original RMSE {self.var_forecast}"
         )
         if corrected is not None:
-            ax9_sec = self._create_twin_axis(ax9, rmse_diff_lon, lon, title_plot_rmse)
-            ax10_sec = self._create_twin_axis(ax10, rmse_diff_lat, lat, title_plot_rmse)
+            ax9_sec = self._create_twin_axis(ax9, rmse_diff_x, x, title_plot_rmse)
+            ax10_sec = self._create_twin_axis(ax10, rmse_diff_y, y, title_plot_rmse)
         if rmse_spatial_plot_type == 'percent':
             rmse_spatial_plot = rmse_spatial_percent
             rmse_unit_plot = '%'
@@ -1772,14 +1807,14 @@ class WeatherRun:
         vcenter_data = 0 if vmin_data < 0 and vmax_data > 0 else vmin_data+(vmax_data-vmin_data)/2
         self.logger.info(f"RMSE plots vmin: {vmin_data}, vcenter: {vcenter_data}, vmax: {vmax_data}")
         title_plot = f"RMSE original {self.var_forecast} {extra_info} {date_string}" if extra_info else f"RMSE original {self.var_forecast} {date_string}"
-        self._create_cartopy_axis(
-            ax11, title_plot, rmse_spatial_plot, lon, lat,
+        create_axis_f(
+            ax11, title_plot, rmse_spatial_plot, x, y,
             vmin_data, vmax_data, vcenter_data, self.cmap, rmse_unit_plot, borders=True
         )
         if corrected is not None:
             title_plot = f"RMSE corrected {self.var_forecast} {extra_info} {date_string}" if extra_info else f"RMSE corrected {self.var_forecast} {date_string}"
-            self._create_cartopy_axis(
-                ax12, title_plot, rmse_corrected_spatial_plot, lon, lat,
+            create_axis_f(
+                ax12, title_plot, rmse_corrected_spatial_plot, x, y,
                 vmin_data, vmax_data, vcenter_data, self.cmap, rmse_unit_plot, borders=True
             )
             rmse_improv = rmse_spatial - rmse_corrected_spatial
@@ -1787,8 +1822,8 @@ class WeatherRun:
             vmin_data, vmax_data = -v_abs, v_abs
             vcenter_data = 0 if vmin_data < 0 and vmax_data > 0 else vmin_data+(vmax_data-vmin_data)/2
             title_plot = f"RMSE original - corrected {self.var_forecast} {extra_info} {date_string}" if extra_info else f"RMSE original - corrected {self.var_forecast} {date_string}"
-            self._create_cartopy_axis(
-                ax13, title_plot, rmse_improv, lon, lat,
+            create_axis_f(
+                ax13, title_plot, rmse_improv, x, y,
                 vmin_data, vmax_data, vcenter_data, self.cmap_error, self.unit_forecast, borders=True
             )
         plt.tight_layout()
