@@ -1167,31 +1167,21 @@ class WeatherRun:
         # self.logger.debug(f"lat")
         # self.logger.debug(f"{lat}")
         self.logger.debug(f" vmin: {vmin_plt}, vmax: {vmax_plt}, vcenter: {vcenter_plt}")
-        im = ax.pcolormesh(lon, lat,
-                           var,
-                           norm=TwoSlopeNorm(vmin=vmin_plt, vmax=vmax_plt, vcenter=vcenter_plt), cmap=cmap,
-                           transform=ccrs.PlateCarree()
-                          )
+        im = ax.pcolormesh(
+            lon, lat, var,
+            norm=TwoSlopeNorm(vmin=vmin_plt, vmax=vmax_plt, vcenter=vcenter_plt), cmap=cmap
+        )
         ax.coastlines()
         ax.set_extent([lon[0], lon[-1], lat[0], lat[-1]], crs=ccrs.PlateCarree())
         if borders:
             ax.add_feature(cfeature.BORDERS)
-
         # cbar_orientation = "horizontal" if lat.shape[0] >= lon.shape[0] else "vertical"
         cbar_orientation = "vertical"
         divider = make_axes_locatable(ax)
         cax = divider.append_axes("right", size="2%", pad=0.05, axes_class=plt.Axes)
         cb = ax.figure.colorbar(im, cax=cax, orientation=cbar_orientation, label=cbar_label)
         ax.set_aspect('equal', adjustable='box')
-
-        gl = ax.gridlines(
-            draw_labels=True,
-            linewidth=0.5,
-            color='gray',
-            alpha=0.5,
-            linestyle='--'
-        )
-
+        gl = ax.gridlines(draw_labels=True, linewidth=0.5, color='gray', alpha=0.5, linestyle='--')
         # Turn off labels on top and right side
         gl.top_labels = False
         gl.right_labels = False
@@ -1202,6 +1192,7 @@ class WeatherRun:
         # Set spacing manually (e.g., every 10°)
         gl.xlocator = plt.MaxNLocator(5)  # or use FixedLocator
         gl.ylocator = plt.MaxNLocator(5)
+        return im, cb
 
     def interpolate_coords (self, vector):
         return np.interp(
