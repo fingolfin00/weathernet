@@ -1,9 +1,10 @@
 Things to do
 
-1. Reimplement combo mode: run folder structure is not currently good, run root folder needs to be renamed and subfolders with combo parameters must be created
-2. Maybe restructure using xarray?
-3. Add intermediate plotting for data preparation and loading
+1. Extend combo mode to launch experiments with more variables
+2. Maybe restructure using xarray? Pangeo? Pandas?
+3. Add intermediate plotting for data preparation and loading. Holoviz? Plotly? Seaborn?
 4. Normalization is very bad currently moving from CPU to GPU to CPU to GPU too many times. We should go fully pytorch reimplementing the scikit-learn scalers
 5. In combo run add the possibility to run more models with the same setup
-6. Add dropout? Add learning rate scheduler?
-7. Support data parallelism with Lightning/Fabric MPI
+6. Add dropout? Add learning rate scheduler? # DONE?
+7. Support data parallelism with Lightning/Fabric MPI. What about Dask?
+8. Make metrics calculation uniform. Use a library like climpred?
