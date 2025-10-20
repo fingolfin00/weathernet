@@ -6,10 +6,7 @@
     net                     = "SmaAt_UNet"
     accumulate_grad_batches = 2
     save_data_path          = "data/numpy/"  # common
-    extra_data_path         = "data/extra/"  # common
     figure_path             = "figures/"
-    weights_path            = "data/weights/" # per-run
-    scaler_path             = "data/scalers/" # per-run
     print_date_strformat    = "%Y-%m-%d,%H:%M"
     log_level               = "info" # "debug"
 
@@ -55,10 +52,14 @@
     prod_freq_analysis      = "6h"
     file_format_forecast    = "grib"
     file_format_analysis    = "grib" # "netcdf"
+    lat_res                 = 0.1 # degrees
+    lon_res                 = 0.1 # degrees
 
 [ecmwf]
     ensemble_dataype        = "cf" # "pf"
     origin_frequency        = "6h"
+    lat_res                 = 0.1 # degrees
+    lon_res                 = 0.1 # degrees
 
 [train]
     # 5 years training for cmcc italian peninsula dataset
@@ -74,7 +75,9 @@
     test_end_date           = "2025-04-02T00:00:00"
     # test_start_date         = "2021-01-01T00:00:00"
     # test_end_date           = "2021-01-04T00:00:00"
-    cmap                    = "magma"
+
+[viz]
+    cmap                    = "jet"
     cmap_anomaly            = "RdBu"
     cmap_error              = "bwr"
 
